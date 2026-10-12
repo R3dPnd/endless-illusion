@@ -1,0 +1,13 @@
+{
+  "agent": "saudade-of-sunday",
+  "day": "Sunday",
+  "role": "recon & attack-surface mapping",
+  "model": "sonnet",
+  "classification": "recon",
+  "needs_authorization": "for active recon only",
+  "tools": {
+    "default_safe": ["Read", "Grep", "Glob", "WebSearch", "WebFetch"],
+    "authorized_active": ["Read", "Grep", "Glob", "WebSearch", "WebFetch", "Bash"]
+  },
+  "notes": "Passive recon with default_safe. authorized_active adds Bash for in-scope active enumeration (subdomain/port/dir discovery) and must only be enabled with documented authorization + agreed rate limits. No exploitation, ever."
+}

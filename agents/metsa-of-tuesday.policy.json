@@ -1,0 +1,13 @@
+{
+  "agent": "metsa-of-tuesday",
+  "day": "Tuesday",
+  "role": "API testing",
+  "model": "sonnet",
+  "classification": "active-testing",
+  "needs_authorization": true,
+  "tools": {
+    "default_safe": ["Read", "Grep", "Glob", "WebFetch"],
+    "authorized_active": ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash", "Write"]
+  },
+  "notes": "default_safe allows schema/doc review only. authorized_active (adds Bash/Write for live, in-scope API calls) may be enabled ONLY with documented authorization and validated scope. Default to read-only operations; writes/deletes only on non-production data with explicit authorization. Honor rate limits."
+}

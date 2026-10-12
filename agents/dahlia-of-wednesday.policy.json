@@ -1,0 +1,13 @@
+{
+  "agent": "dahlia-of-wednesday",
+  "day": "Wednesday",
+  "role": "CVE & known-issue research",
+  "model": "sonnet",
+  "classification": "passive-research",
+  "needs_authorization": false,
+  "tools": {
+    "default_safe": ["Read", "Grep", "Glob", "WebSearch", "WebFetch"],
+    "authorized_active": []
+  },
+  "notes": "Entirely passive. Never sends traffic to a target, so there is no authorized-active toolset. Prefers primary sources (NVD, vendor advisories, GHSA, KEV) and always cites."
+}

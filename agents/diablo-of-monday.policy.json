@@ -1,0 +1,13 @@
+{
+  "agent": "diablo-of-monday",
+  "day": "Monday",
+  "role": "web application testing",
+  "model": "sonnet",
+  "classification": "active-testing",
+  "needs_authorization": true,
+  "tools": {
+    "default_safe": ["Read", "Grep", "Glob", "WebFetch"],
+    "authorized_active": ["Read", "Grep", "Glob", "WebFetch", "WebSearch", "Bash", "Write"]
+  },
+  "notes": "default_safe allows public-surface review and methodology only. authorized_active (adds Bash/Write for live, in-scope testing) may be enabled ONLY with documented authorization and a validated scope. No destructive payloads, no DoS, no out-of-scope pivoting."
+}
