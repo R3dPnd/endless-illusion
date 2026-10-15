@@ -145,7 +145,10 @@ export function getScope(db, programRef) {
 function listLeads(db) {
   return db
     .prepare(
-      `SELECT l.normalized_url, l.name, l.platform, l.url, l.found_via, l.scope_summary,
+      `SELECT l.normalized_url, l.name, l.platform, l.url, l.found_via,
+              coalesce((SELECT x.scope_summary FROM program_leads x
+                        WHERE x.normalized_url = l.normalized_url AND x.scope_summary <> ''
+                        ORDER BY x.id DESC LIMIT 1), '') AS scope_summary,
               (SELECT count(*) FROM program_leads x WHERE x.normalized_url = l.normalized_url) AS sightings,
               l.created_at
        FROM program_leads l

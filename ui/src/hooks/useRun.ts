@@ -8,6 +8,7 @@ export interface RunRequest {
   scope: string;
   authorization: string;
   enableActive: boolean;
+  programId?: number;
 }
 
 /** Start, stream, and stop one agent run; exposes its events and the derived chat. */

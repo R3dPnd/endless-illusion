@@ -1,23 +1,36 @@
-import { useState } from "react";
-import type { AgentPolicy } from "../../types";
+import { useEffect, useState } from "react";
+import { authorizationText, scopeText } from "../../bounties";
+import type { AgentPolicy, ConfirmedProgram } from "../../types";
 import type { RunRequest } from "../../hooks/useRun";
 import { canGoActive, prettyName } from "../../util";
 import { Button, EmptyState, TextField } from "../ui";
 import ActiveGate from "./ActiveGate";
 import GateStatus from "./GateStatus";
+import ProgramPicker from "./ProgramPicker";
 
 interface Props {
   agent: AgentPolicy | undefined;
   busy: boolean;
   onRun: (body: RunRequest) => void;
+  programs: ConfirmedProgram[];
+  programId: number | null;
+  onProgramChange: (id: number | null) => void;
 }
 
-export default function RunForm({ agent, busy, onRun }: Props) {
+export default function RunForm({ agent, busy, onRun, programs, programId, onProgramChange }: Props) {
   const [task, setTask] = useState("");
   const [scope, setScope] = useState("");
   const [authorization, setAuthorization] = useState("");
   const [enableActive, setEnableActive] = useState(false);
   const [confirm, setConfirm] = useState(false);
+
+  // Choosing a program fills Scope and Authorization from its confirmed snapshot.
+  const program = programs.find((p) => p.id === programId);
+  useEffect(() => {
+    if (!program) return;
+    setScope(scopeText(program));
+    setAuthorization(authorizationText(program));
+  }, [program]);
 
   const activeCapable = canGoActive(agent);
   const hasAuth = authorization.trim().length > 0;
@@ -35,13 +48,15 @@ export default function RunForm({ agent, busy, onRun }: Props) {
       onSubmit={(e) => {
         e.preventDefault();
         if (!canSubmit) return;
-        onRun({ task, scope, authorization, enableActive: activeArmed });
+        onRun({ task, scope, authorization, enableActive: activeArmed, ...(program ? { programId: program.id } : {}) });
       }}
     >
       <div className="run-form__agent">
         Dispatching to <strong>{prettyName(agent.agent)}</strong>
         {agent.role === "orchestrator" && <span className="hint"> — will route to the specialists</span>}
       </div>
+
+      {programs.length > 0 && <ProgramPicker programs={programs} value={programId} onChange={onProgramChange} />}
 
       <TextField
         label="Task"

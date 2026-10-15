@@ -128,6 +128,12 @@ describe("readers", () => {
     expect(leads[0].name).toBe("Acme VDP");
   });
 
+  it("keeps the latest non-empty scope summary across sightings", () => {
+    insertAgentRow(db, { agent: SAUDADE, runId: "r1", table: "program_leads", fields: { name: "Acme", url: "https://hackerone.com/acme", found_via: "security.txt", scope_summary: "*.acme.com per policy" } });
+    insertAgentRow(db, { agent: DAHLIA, runId: "r2", table: "program_leads", fields: { name: "Acme", url: "https://hackerone.com/acme", found_via: "advisory" } });
+    expect(listPrograms(db, "leads")[0].scope_summary).toBe("*.acme.com per policy");
+  });
+
   it("lists programs by stage", () => {
     insertAgentRow(db, { agent: DAHLIA, runId: "r", table: "program_leads", fields: { name: "Lead Co", url: "https://bugcrowd.com/leadco", found_via: "advisory" } });
     addProgram();
