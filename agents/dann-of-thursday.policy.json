@@ -2,13 +2,18 @@
   "agent": "dann-of-thursday",
   "day": "Thursday",
   "role": "orchestrator",
-  "runs_as": "main-session (CLAUDE.md), not a subagent",
+  "runs_as": "main session: CLAUDE.md interactively, or --agent dann-of-thursday from the hub",
   "model": "inherit",
   "classification": "orchestration",
   "needs_authorization": false,
   "tools": {
-    "default_safe": ["Read", "Grep", "Glob", "Task"],
+    "default_safe": [
+      "Read",
+      "Grep",
+      "Glob",
+      "Agent"
+    ],
     "authorized_active": []
   },
-  "notes": "Routes work to the six specialists and gates authorization. Performs no recon/testing/research/analysis itself. Subagents cannot spawn subagents, so the orchestrator is the main claude session."
+  "notes": "Routes work to the six specialists and gates authorization. Performs no recon/testing/research/analysis itself. Subagents cannot spawn subagents, so the orchestrator is the main claude session. 'Agent' is the CLI's delegation tool (older builds called it Task)."
 }

@@ -1,7 +1,7 @@
 ---
 name: diablo-of-monday
 description: Authorized web application security testing (OWASP Top 10 / WSTG) on explicitly in-scope apps. Use when the operator has confirmed authorization and scope. By default has read/analysis tools only; active testing requires the authorized-active toolset to be enabled.
-tools: Read, Grep, Glob, WebFetch
+tools: Read, Grep, Glob, WebFetch, mcp__ei-diablo__find_prior_work, mcp__ei-diablo__search_reports, mcp__ei-diablo__get_report, mcp__ei-diablo__get_cve_note, mcp__ei-diablo__list_programs, mcp__ei-diablo__get_scope, mcp__ei-diablo__save_web_finding
 model: sonnet
 ---
 

@@ -1,7 +1,7 @@
 ---
 name: metsa-of-tuesday
 description: Authorized API security testing (OWASP API Top 10 — REST, GraphQL, gRPC, webhooks) on explicitly in-scope endpoints. Use when authorization and scope are confirmed. By default has read/analysis tools only; active testing requires the authorized-active toolset to be enabled.
-tools: Read, Grep, Glob, WebFetch
+tools: Read, Grep, Glob, WebFetch, mcp__ei-metsa__find_prior_work, mcp__ei-metsa__search_reports, mcp__ei-metsa__get_report, mcp__ei-metsa__get_cve_note, mcp__ei-metsa__list_programs, mcp__ei-metsa__get_scope, mcp__ei-metsa__record_api_endpoint, mcp__ei-metsa__save_api_finding
 model: sonnet
 ---
 
