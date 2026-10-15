@@ -1,4 +1,4 @@
-import type { AgentPolicy, RunEvent, StartRunResponse } from "./types";
+import type { AgentPolicy, Bounties, CveNote, Finding, RunEvent, RunSummary, StartRunResponse, Submission } from "./types";
 
 export async function getAgents(): Promise<AgentPolicy[]> {
   const res = await fetch("/api/agents");
@@ -12,6 +12,7 @@ export interface StartRunBody {
   scope?: string;
   authorization?: string;
   enableActive?: boolean;
+  programId?: number;
 }
 
 export async function startRun(body: StartRunBody): Promise<StartRunResponse> {
@@ -55,3 +56,36 @@ export function openRunStream(
   };
   return () => es.close();
 }
+
+// ---- archive + bounties -----------------------------------------------------
+
+async function getJson<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `GET ${url} failed: ${res.status}`);
+  return data as T;
+}
+
+async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `POST ${url} failed: ${res.status}`);
+  return data as T;
+}
+
+export const listRuns = (params: { agent?: string; status?: string; q?: string } = {}) => {
+  const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v) as [string, string][]).toString();
+  return getJson<RunSummary[]>(`/api/runs${qs ? `?${qs}` : ""}`);
+};
+export const listFindings = () => getJson<Finding[]>("/api/findings");
+export const listCveNotes = () => getJson<CveNote[]>("/api/cve-notes");
+export const listSubmissions = () => getJson<Submission[]>("/api/submissions");
+export const exportSubmissionUrl = (id: number) => `/api/submissions/${id}/export`;
+
+export const getBounties = () => getJson<Bounties>("/api/bounties");
+export const trackLead = (normalizedUrl: string) => postJson<{ programId: number }>("/api/leads/track", { normalizedUrl });
+export const dismissLead = (normalizedUrl: string) => postJson("/api/leads/dismiss", { normalizedUrl });
+export const confirmProposal = (id: number) => postJson<{ snapshotId: number }>(`/api/proposals/${id}/confirm`);
+export const rejectProposal = (id: number) => postJson(`/api/proposals/${id}/reject`);
+export const addProgram = (body: { name: string; url: string; platform?: string; policyText?: string }) =>
+  postJson<{ programId: number }>("/api/programs", body);

@@ -54,3 +54,129 @@ export interface StartRunResponse {
   tools: string[];
   activeEngaged: boolean;
 }
+
+// ---- archive ----
+
+export interface RunSummary {
+  id: string;
+  agent: string;
+  task: string;
+  scope: string;
+  status: "running" | "done" | "error" | "stopped" | "interrupted";
+  active_engaged: boolean;
+  tools: string[];
+  program_id: number | null;
+  snapshot_id: number | null;
+  cost_usd: number | null;
+  duration_ms: number | null;
+  started_at: string;
+  ended_at: string | null;
+}
+
+export type Severity = "info" | "low" | "medium" | "high" | "critical";
+
+export interface Finding {
+  id: number;
+  kind: "web" | "api";
+  agent: string;
+  run_id: string | null;
+  created_at: string;
+  target: string;
+  title: string;
+  status: "confirmed" | "suspected" | "not_reproduced";
+  severity: Severity;
+  description: string;
+  impact: string;
+  remediation: string;
+}
+
+export interface CveNote {
+  id: number;
+  agent: string;
+  run_id: string | null;
+  created_at: string;
+  cve_id: string;
+  product: string;
+  affected_versions: string;
+  fixed_version: string | null;
+  cvss: string | null;
+  kev: boolean;
+  public_exploit: boolean;
+  summary: string;
+  sources: string[];
+}
+
+export interface Submission {
+  id: number;
+  agent: string;
+  run_id: string | null;
+  created_at: string;
+  program_id: number;
+  program_name: string;
+  program_url: string;
+  title: string;
+  severity: Severity;
+  body_markdown: string;
+}
+
+// ---- bounties ----
+
+export interface ScopeItem {
+  asset: string;
+  type?: string;
+  notes?: string;
+}
+
+export interface Lead {
+  normalizedUrl: string;
+  name: string;
+  platform: string | null;
+  url: string;
+  foundVia: string;
+  scopeSummary: string;
+  sightings: number;
+  agents: string[];
+  runIds: string[];
+  firstSeen: string;
+  lastSeen: string;
+}
+
+export interface Proposal {
+  id: number;
+  agent: string;
+  runId: string | null;
+  createdAt: string;
+  inScope: ScopeItem[];
+  outOfScope: ScopeItem[];
+  exclusions: string[];
+  sourceExcerpt: string;
+}
+
+export interface Program {
+  id: number;
+  name: string;
+  platform: string | null;
+  url: string;
+  normalizedUrl: string;
+  source: "manual" | "lead" | "sync";
+  createdAt: string;
+  proposals: Proposal[];
+  policyText?: string;
+}
+
+export interface ConfirmedProgram extends Program {
+  snapshot: {
+    id: number;
+    inScope: ScopeItem[];
+    outOfScope: ScopeItem[];
+    exclusions: string[];
+    confirmedAt: string;
+    stale: boolean;
+  };
+}
+
+export interface Bounties {
+  leads: Lead[];
+  tracked: Program[];
+  confirmed: ConfirmedProgram[];
+}
