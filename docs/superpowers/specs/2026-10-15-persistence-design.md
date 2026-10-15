@@ -130,19 +130,27 @@ A Node stdio MCP server. Each run's MCP config starts **one instance per agent**
    to its own list; MCP servers come only from the generated `--mcp-config`
    (`--strict-mcp-config`).
 
-**Verification gate (plan task 1):** confirm on Claude Code 2.1.300 that
-(a) a subagent's `tools:` list restricts MCP tools, (b) `--agent` restricts the
-main thread, and (c) `--allowedTools` permits subagent MCP calls in `-p` mode.
-If (a) or (b) fails, orchestrated runs mount **read-only** tools for all agents
-plus Dann's own, and specialist writes happen only in direct (single-agent)
-runs. Layer 2 stays in place in both cases.
+**Verification gate — run 2026-10-15 on Claude Code 2.1.300:**
+- (a) A subagent's `tools:` list **does** restrict MCP tools (forbidden tool: "No such tool available"). ✅
+- (b) `--agent <name>` **does** restrict the main thread to that definition's `tools:`. ✅
+- (c) `--allowedTools` **does not restrict** anything in `-p` mode — it only
+  pre-approves. A run with `--allowedTools Read,Grep,Glob` executed `Bash`.
+  `--tools <list>` **does** remove tools from the session. ❌ → fixed below.
+
+Consequences:
+- The hub restricts sessions with **`--tools`** (built-ins) and
+  **`--strict-mcp-config`** (MCP), never `--allowedTools` alone. This also
+  closes a pre-existing hole: "passive" runs could use `Bash` and the operator's
+  global MCP servers (e.g. a browser).
+- Orchestrated runs launch with `--agent dann-of-thursday`.
 
 ## 6. Hub server changes (`ui/server.mjs`)
 
 - Opens the DB at startup; marks any `running` runs `interrupted`.
 - `startRun`: inserts `runs`; writes a per-run MCP config file to
-  `data/run-configs/<id>.json`; adds the relevant `mcp__ei-*` tools to
-  `--allowedTools`; accepts optional `programId` (must have a confirmed snapshot;
+  `data/run-configs/<id>.json` and passes it with `--strict-mcp-config`;
+  restricts built-ins with `--tools` (and pre-approves the same set plus the
+  run's `mcp__ei-*` tools with `--allowedTools`); accepts optional `programId` (must have a confirmed snapshot;
   stores `program_id` + `snapshot_id`).
 - On each stream event: append to `run_events`. On subagent `tool_result` for a
   delegation and on `result`: insert `reports` (hand-back wrapper stripped,
