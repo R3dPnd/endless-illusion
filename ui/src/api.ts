@@ -26,7 +26,7 @@ export async function startRun(body: StartRunBody): Promise<StartRunResponse> {
 }
 
 export async function stopRun(id: string): Promise<void> {
-  await fetch(`/api/runs/${id}/stop`, { method: "POST" });
+  await fetch(`/api/runs/${id}/stop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
 }
 
 /** Opens an SSE stream for a run. Returns a cleanup function. */

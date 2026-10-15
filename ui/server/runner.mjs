@@ -40,7 +40,8 @@ export function createRunner({ db, dbFile, dataDir, claudeBin, repoRoot }) {
   const agentsDir = path.join(repoRoot, "agents");
   const live = new Map();
 
-  async function start(body) {
+  /** link: { programId, snapshotId } resolved by the server from a confirmed snapshot — never taken from the request. */
+  async function start(body, link = {}) {
     const { agent, task } = body;
     const scope = body.scope || "";
     const authorization = body.authorization || "";
@@ -81,7 +82,7 @@ export function createRunner({ db, dbFile, dataDir, claudeBin, repoRoot }) {
     const run = {
       id, agent, orchestrated, activeEngaged, tools,
       status: "running", events: [], emitter: new EventEmitter(), proc: null, result: null,
-      programId: body.programId ?? null, snapshotId: body.snapshotId ?? null,
+      programId: link.programId ?? null, snapshotId: link.snapshotId ?? null,
     };
     live.set(id, run);
 
