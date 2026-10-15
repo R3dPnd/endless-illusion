@@ -1,4 +1,5 @@
 import type { RunEvent } from "./types";
+import { DELEGATE_TOOLS, cleanReport, resultText } from "../shared/report.mjs";
 
 export type ChatKind = "prompt" | "message" | "handoff" | "report" | "final";
 
@@ -22,51 +23,9 @@ export interface Chat {
   finalText?: string;
 }
 
-export const DELEGATE_TOOLS = new Set(["Task", "Agent"]);
+export { DELEGATE_TOOLS, cleanReport };
 
 type Block = { type: string; [k: string]: unknown };
-
-function resultText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((c) => (c && typeof c === "object" && (c as Block).type === "text" ? String((c as Block).text ?? "") : ""))
-      .filter(Boolean)
-      .join("\n\n");
-  }
-  return "";
-}
-
-/**
- * Strip the harness framing from a subagent's hand-back: the "[Subagent
- * hand-back] … The report follows:" preamble, the two-space indent on every
- * report line, and the trailing agentId / <usage> lines (kept as stats).
- */
-export function cleanReport(raw: string): { text: string; meta?: string } {
-  let text = raw;
-  const marker = "The report follows:";
-  if (text.startsWith("[Subagent hand-back]") && text.includes(marker)) {
-    text = text.slice(text.indexOf(marker) + marker.length).replace(/^\r?\n/, "");
-    text = text.replace(/^ {2}/gm, "");
-  }
-  let meta: string | undefined;
-  const usage = text.match(/<usage>([\s\S]*?)<\/usage>\s*$/);
-  if (usage) {
-    const field = (k: string) => usage[1].match(new RegExp(`${k}:\\s*(\\d+)`))?.[1];
-    const tools = field("tool_uses");
-    const ms = field("duration_ms");
-    const parts: string[] = [];
-    if (tools) parts.push(`${tools} tool uses`);
-    if (ms) {
-      const sec = Math.round(Number(ms) / 1000);
-      parts.push(sec >= 60 ? `${Math.floor(sec / 60)}m ${sec % 60}s` : `${sec}s`);
-    }
-    meta = parts.join(" · ") || undefined;
-    text = text.slice(0, usage.index);
-  }
-  text = text.replace(/\n?agentId: \S+ \(use SendMessage[^\n]*\)\s*$/, "");
-  return { text: text.trim(), meta };
-}
 
 /**
  * Fold a run's stream-json events into a chat between the operator and the

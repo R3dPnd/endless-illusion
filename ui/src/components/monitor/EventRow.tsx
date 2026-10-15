@@ -23,6 +23,12 @@ export default function EventRow({ evt }: { evt: RunEvent }) {
           <pre>{evt.text}</pre>
         </FeedRow>
       );
+    case "warn":
+      return (
+        <FeedRow ts={evt.ts} variant="warn">
+          <span>⚠ {evt.text}</span>
+        </FeedRow>
+      );
     case "error":
       return (
         <FeedRow ts={evt.ts} variant="error">

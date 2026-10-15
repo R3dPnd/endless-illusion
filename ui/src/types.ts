@@ -18,6 +18,7 @@ export type RunEvent =
   | { kind: "stdout"; text: string; ts: number }
   | { kind: "stderr"; text: string; ts: number }
   | { kind: "error"; text: string; ts: number }
+  | { kind: "warn"; text: string; ts: number }
   | { kind: "closed"; code: number | null; status: string; ts: number };
 
 // A loose shape for Claude Code's stream-json events.

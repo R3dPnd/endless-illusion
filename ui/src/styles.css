@@ -247,6 +247,7 @@ code, pre, textarea, .md, .tool-input { font-family: var(--mono); }
 .row--result-in { border-left-color: #3a3a6a; padding-top: 4px; padding-bottom: 4px; }
 .row--error, .row--stderr { border-left-color: var(--red); background: #2a0a16; }
 .row--error { color: var(--red); }
+.row--warn { border-left-color: var(--orange); background: #241304; color: var(--orange); }
 .row--closed { border-left-color: var(--muted); color: var(--muted); }
 .row--final { border-left-color: var(--green); background: #04200f; }
 .row--final.is-error { border-left-color: var(--red); background: #2a0a16; }
