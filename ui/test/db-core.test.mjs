@@ -2,6 +2,8 @@ import { describe, it, expect } from "vitest";
 import { mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { openDb } from "../db/index.mjs";
 import { migrate } from "../db/migrate.mjs";
 import { OWNERSHIP, assertOwns, serverName } from "../db/ownership.mjs";
@@ -35,6 +37,23 @@ describe("on-disk database", () => {
     const db = openDb(file);
     expect(statSync(file).mode & 0o777).toBe(0o600);
     expect(db.prepare("PRAGMA journal_mode").get().journal_mode).toBe("wal");
+  });
+});
+
+describe("concurrent first open", () => {
+  it("lets several processes migrate a fresh database at once", async () => {
+    const file = path.join(mkdtempSync(path.join(tmpdir(), "ei-race-")), "ei.db");
+    const dbModule = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "db", "index.mjs");
+    const script = `import { openDb } from ${JSON.stringify(dbModule)}; openDb(${JSON.stringify(file)});`;
+    const codes = await Promise.all(
+      Array.from({ length: 8 }, () => new Promise((resolve) => {
+        const p = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "ignore", "pipe"] });
+        let err = "";
+        p.stderr.on("data", (d) => (err += d));
+        p.on("close", (code) => resolve(code === 0 ? 0 : err.split("\n").find((l) => /Error/.test(l)) ?? code));
+      })),
+    );
+    expect(codes).toEqual(Array(8).fill(0));
   });
 });
 

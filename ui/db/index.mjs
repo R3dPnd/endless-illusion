@@ -12,8 +12,8 @@ export function openDb(file) {
   const isNew = onDisk && !existsSync(file);
   const db = new DatabaseSync(file);
   if (isNew) chmodSync(file, 0o600);
-  if (onDisk) db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA busy_timeout = 5000");
+  if (onDisk) db.exec("PRAGMA journal_mode = WAL");
   db.exec("PRAGMA foreign_keys = ON");
   migrate(db);
   return db;
