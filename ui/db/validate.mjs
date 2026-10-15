@@ -1,16 +1,4 @@
-import { clip, MAX_TEXT, redact } from "./redact.mjs";
-
-/** Apply clip + redact to every string inside a JSON-able value. */
-function cleanStrings(value) {
-  if (typeof value === "string") return redact(clip(value));
-  if (Array.isArray(value)) return value.map(cleanStrings);
-  if (value !== null && typeof value === "object") {
-    const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = cleanStrings(v);
-    return out;
-  }
-  return value;
-}
+import { clip, MAX_TEXT, redact, redactDeep } from "./redact.mjs";
 
 /** Convert one incoming value to its stored form, or throw a descriptive error. */
 function toStored(label, spec, value) {
@@ -34,7 +22,7 @@ function toStored(label, spec, value) {
     return value;
   }
   if (spec.type === "json") {
-    const stored = JSON.stringify(cleanStrings(value));
+    const stored = JSON.stringify(redactDeep(value));
     if (stored === undefined) fail("must be JSON-serializable");
     if (stored.length > MAX_TEXT) fail("is too large");
     return stored;

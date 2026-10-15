@@ -20,3 +20,15 @@ export function redact(text) {
 export function clip(text, max = MAX_TEXT) {
   return typeof text === "string" && text.length > max ? text.slice(0, max) : text;
 }
+
+/** Clip + redact every string inside a JSON-able value, leaving its structure intact. */
+export function redactDeep(value) {
+  if (typeof value === "string") return redact(clip(value));
+  if (Array.isArray(value)) return value.map(redactDeep);
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [k, v] of Object.entries(value)) out[k] = redactDeep(v);
+    return out;
+  }
+  return value;
+}

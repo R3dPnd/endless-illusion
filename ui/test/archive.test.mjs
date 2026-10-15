@@ -30,6 +30,18 @@ describe("archive (unit)", () => {
     expect(listRuns(db, {}).map((r) => r.id)).toEqual(["r1"]);
   });
 
+  it("redacts secrets in events without corrupting them", () => {
+    const db = openDb(":memory:");
+    createRun(db, baseRun({ id: "r3" }));
+    const cmd = 'curl -d "password=hunter2" -H "Authorization: Bearer abc.def"';
+    appendEvent(db, "r3", 0, { kind: "claude", ts: 1, data: { type: "assistant", message: { content: [{ type: "tool_use", name: "Bash", input: { command: cmd } }] } } });
+    const [evt] = getRunEvents(db, "r3");
+    const stored = evt.data.message.content[0].input.command;
+    expect(stored).not.toContain("hunter2");
+    expect(stored).not.toContain("abc.def");
+    expect(stored).toContain('-H "Authorization: Bearer [REDACTED]"');
+  });
+
   it("marks runs left running as interrupted and keeps their events", () => {
     const db = openDb(":memory:");
     createRun(db, baseRun({ id: "r2" }));

@@ -1,5 +1,5 @@
 import { nowIso } from "./index.mjs";
-import { clip, redact } from "./redact.mjs";
+import { clip, redact, redactDeep } from "./redact.mjs";
 
 /**
  * The hub's record of every run: the run row, its raw event stream, and the
@@ -26,9 +26,9 @@ export function createRun(db, run) {
   );
 }
 
-/** Append one stream event. Strings inside are redacted before storage. */
+/** Append one stream event. Each string inside is redacted before serializing, so the JSON stays valid. */
 export function appendEvent(db, runId, seq, evt) {
-  const stored = redact(JSON.stringify(evt));
+  const stored = JSON.stringify(redactDeep(evt));
   db.prepare("INSERT INTO run_events (run_id, seq, ts, event) VALUES (?, ?, ?, ?)").run(runId, seq, evt.ts ?? Date.now(), stored);
 }
 
