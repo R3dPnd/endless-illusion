@@ -17,3 +17,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.swp
+
+# Superpowers plan workspaces (scratch)
+.superpowers/

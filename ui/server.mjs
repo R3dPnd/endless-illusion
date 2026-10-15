@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import crypto from "node:crypto";
+import { buildSessionArgs } from "./server/session.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.resolve(__dirname, "..");
@@ -97,9 +98,10 @@ async function startRun(body) {
   let tools;
   let activeEngaged = false;
   if (orchestrated) {
-    // Union of every agent's passive toolset, plus Task to delegate.
+    // Union of every agent's passive toolset, plus Agent to delegate
+    // (the CLI's delegation tool; older builds called it Task).
     const policies = await loadPolicies();
-    const passive = new Set(["Task"]);
+    const passive = new Set(["Agent"]);
     for (const p of policies) (p.tools?.default_safe || []).forEach((t) => passive.add(t));
     tools = [...passive];
   } else {
@@ -116,18 +118,10 @@ async function startRun(body) {
     }
   }
 
-  // ---- build CLI args (no user input here — only controlled values) ----
-  const args = [
-    "-p",
-    "--output-format", "stream-json",
-    "--verbose",
-    "--allowedTools", tools.join(","),
-  ];
-
   // For a specific (non-orchestrator) agent, append its dossier + the RoE so a
   // direct invocation carries the same persona and rules the subagent would.
+  let sys = "";
   if (!orchestrated) {
-    let sys = "";
     try {
       const dossier = await readFile(path.join(AGENTS_DIR, `${agent}.md`), "utf8");
       const roe = await readFile(path.join(REPO_ROOT, "RULES-OF-ENGAGEMENT.md"), "utf8");
@@ -135,8 +129,10 @@ async function startRun(body) {
     } catch (err) {
       console.error(`[dossier] ${agent}:`, err.message);
     }
-    if (sys) args.push("--append-system-prompt", sys);
   }
+
+  // ---- build CLI args (no user input here — only controlled values) ----
+  const args = buildSessionArgs({ tools, systemPrompt: sys || undefined });
 
   const prompt = buildPrompt({ agent, task, scope, authorization, orchestrated });
 
