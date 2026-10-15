@@ -3,6 +3,12 @@
 /** Tool names the CLI uses for delegating to a subagent. */
 export const DELEGATE_TOOLS = new Set(["Task", "Agent"]);
 
+/**
+ * Tool a subagent calls to deliver its report (Claude Code 2.1+). Its input
+ * carries the report; the delegation's own tool_result then only points to it.
+ */
+export const HANDBACK_TOOLS = new Set(["SubagentHandback"]);
+
 /** Text of a tool_result's content (string or array of text blocks). */
 export function resultText(content) {
   if (typeof content === "string") return content;

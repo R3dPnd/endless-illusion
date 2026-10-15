@@ -90,6 +90,20 @@ describe("hub archives a run end to end", () => {
     expect(JSON.parse(reports[0].meta).stats).toBe("4 tool uses · 1m 5s");
   });
 
+  it("stores the SubagentHandback message as the subagent's report", async () => {
+    process.env.FAKE_FIXTURE = "run-events-handback.jsonl";
+    try {
+      const id = await runToCompletion({ agent: "dann-of-thursday", task: "Check prior work" });
+      const sub = ctx.db.prepare("SELECT agent, text, meta FROM reports WHERE run_id = ? AND kind = 'subagent_report'").all(id);
+      expect(sub).toHaveLength(1);
+      expect(sub[0].agent).toBe("dahlia-of-wednesday");
+      expect(sub[0].text).toBe("One stored note: CVE-2021-44228, CVSS 10.0, KEV since 2021-12-10.");
+      expect(JSON.parse(sub[0].meta).stats).toBe("4 tool uses · 21s");
+    } finally {
+      delete process.env.FAKE_FIXTURE;
+    }
+  });
+
   it("launches orchestrated runs restricted, as Dann, with every agent's memory server", async () => {
     const id = await runToCompletion({ agent: "dann-of-thursday", task: "x" });
     const argv = JSON.parse(readFileSync(argvFile, "utf8"));

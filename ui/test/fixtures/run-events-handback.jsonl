@@ -1,0 +1,8 @@
+{"type":"system","subtype":"init","model":"claude-sonnet-5-5","tools":["Agent","Read"]}
+{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_d","name":"Agent","input":{"subagent_type":"dahlia-of-wednesday","description":"Prior work","prompt":"Check stored notes for CVE-2021-44228."}}]}}
+{"type":"assistant","parent_tool_use_id":"toolu_d","message":{"content":[{"type":"text","text":"Checking my memory first."}]}}
+{"type":"assistant","parent_tool_use_id":"toolu_d","message":{"content":[{"type":"tool_use","id":"toolu_h","name":"SubagentHandback","input":{"message":"One stored note: CVE-2021-44228, CVSS 10.0, KEV since 2021-12-10."}}]}}
+{"type":"user","parent_tool_use_id":"toolu_d","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_h","content":[{"type":"text","text":"{\"success\":true,\"message\":\"Report delivered to your caller.\"}"}]}]}}
+{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_d","content":[{"type":"text","text":"  This agent's report was delivered to you as a message from \"abc\" (its SubagentHandback call). Read it there; it is not repeated here.\n  \nagentId: abc\n<usage>subagent_tokens: 12010\ntool_uses: 4\nduration_ms: 21000</usage>"}]}]}}
+{"type":"assistant","message":{"content":[{"type":"text","text":"Dahlia found one stored note."}]}}
+{"type":"result","subtype":"success","is_error":false,"result":"Dahlia found one stored note.","total_cost_usd":0.05,"duration_ms":30000,"num_turns":2}

@@ -7,7 +7,7 @@ import crypto from "node:crypto";
 import { AGENTS, OWNERSHIP } from "../db/ownership.mjs";
 import { addReport, appendEvent, createRun, finishRun } from "../db/archive.mjs";
 import { qualifiedToolsFor } from "../mcp/tool-names.mjs";
-import { cleanReport, DELEGATE_TOOLS, resultText } from "../shared/report.mjs";
+import { cleanReport, DELEGATE_TOOLS, HANDBACK_TOOLS, resultText } from "../shared/report.mjs";
 import { getPolicy, loadPolicies } from "./policies.mjs";
 import { buildPrompt } from "./prompt.mjs";
 import { buildSessionArgs, writeMcpConfig } from "./session.mjs";
@@ -110,17 +110,23 @@ export function createRunner({ db, dbFile, dataDir, claudeBin, repoRoot }) {
     push({ kind: "meta", agent, orchestrated, activeEngaged, tools, ts: Date.now() });
 
     const delegations = new Map(); // tool_use id -> subagent id
+    const handbacks = new Map(); // delegation id -> report delivered via SubagentHandback
     const collectReports = (data) => {
       const content = Array.isArray(data.message?.content) ? data.message.content : [];
       if (data.type === "assistant") {
         for (const b of content) {
           if (b.type === "tool_use" && DELEGATE_TOOLS.has(b.name) && b.input?.subagent_type) delegations.set(b.id, b.input.subagent_type);
+          if (b.type === "tool_use" && HANDBACK_TOOLS.has(b.name) && delegations.has(data.parent_tool_use_id)) {
+            handbacks.set(data.parent_tool_use_id, String(b.input?.message ?? ""));
+          }
         }
       } else if (data.type === "user") {
         for (const b of content) {
           const sub = b.type === "tool_result" && delegations.get(b.tool_use_id);
           if (!sub) continue;
-          const { text, meta } = cleanReport(resultText(b.content));
+          const cleaned = cleanReport(resultText(b.content));
+          const text = handbacks.get(b.tool_use_id) ?? cleaned.text;
+          const meta = cleaned.meta;
           if (text) archive("report", () => addReport(db, { runId: id, agent: sub, kind: "subagent_report", text, meta: meta ? { stats: meta } : null }));
         }
       } else if (data.type === "result" && typeof data.result === "string") {

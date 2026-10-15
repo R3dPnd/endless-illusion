@@ -1,5 +1,5 @@
 import type { RunEvent } from "./types";
-import { DELEGATE_TOOLS, cleanReport, resultText } from "../shared/report.mjs";
+import { DELEGATE_TOOLS, HANDBACK_TOOLS, cleanReport, resultText } from "../shared/report.mjs";
 
 export type ChatKind = "prompt" | "message" | "handoff" | "report" | "final";
 
@@ -40,6 +40,8 @@ export function buildChat(events: RunEvent[], task: string | undefined): Chat {
   let finalText: string | undefined;
   // delegation tool_use id -> subagent id
   const delegations = new Map<string, string>();
+  // delegation id -> report the subagent delivered via SubagentHandback
+  const handbacks = new Map<string, string>();
   // speaker of each delegation's caller, so nested handoffs report to the right agent
   const callers = new Map<string, string>();
 
@@ -83,6 +85,8 @@ export function buildChat(events: RunEvent[], task: string | undefined): Chat {
             ts: evt.ts,
           });
           active = target;
+        } else if (b.type === "tool_use" && HANDBACK_TOOLS.has(String(b.name)) && parentId && delegations.has(parentId)) {
+          handbacks.set(parentId, String((b.input as { message?: unknown } | undefined)?.message ?? ""));
         } else if (b.type === "tool_use") {
           active = speaker;
         }
@@ -95,7 +99,9 @@ export function buildChat(events: RunEvent[], task: string | undefined): Chat {
         if (b.type !== "tool_result") return;
         const target = delegations.get(String(b.tool_use_id));
         if (!target) return;
-        const { text, meta } = cleanReport(resultText(b.content));
+        const cleaned = cleanReport(resultText(b.content));
+        const text = handbacks.get(String(b.tool_use_id)) ?? cleaned.text;
+        const meta = cleaned.meta;
         // If the subagent's own messages were streamed, its last one is this report.
         const prev = lastFrom(target);
         if (prev && prev.kind === "message" && prev.text.trim() === text) {
