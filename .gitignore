@@ -20,3 +20,6 @@ Thumbs.db
 
 # Superpowers plan workspaces (scratch)
 .superpowers/
+
+# Hub database and per-run MCP configs (target data; never commit)
+data/
