@@ -6,11 +6,11 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { AGENTS, OWNERSHIP } from "../db/ownership.mjs";
 import { addReport, appendEvent, createRun, finishRun } from "../db/archive.mjs";
-import { qualifiedToolsFor } from "../mcp/tool-names.mjs";
+import { qualifiedToolsFor, SHARED_READ_TOOLS } from "../mcp/tool-names.mjs";
 import { cleanReport, DELEGATE_TOOLS, HANDBACK_TOOLS, resultText } from "../shared/report.mjs";
 import { getPolicy, loadPolicies } from "./policies.mjs";
 import { buildPrompt } from "./prompt.mjs";
-import { buildSessionArgs, writeMcpConfig } from "./session.mjs";
+import { buildSessionArgs, loadSharedServer, writeMcpConfig } from "./session.mjs";
 
 export const ORCHESTRATOR = "dann-of-thursday";
 
@@ -54,27 +54,29 @@ export function createRunner({ db, dbFile, dataDir, claudeBin, repoRoot }) {
       agentsDir, agent, orchestrated, enableActive: Boolean(body.enableActive), authorization, policy,
     });
 
-    // Direct runs carry the agent's dossier + the RoE, as the subagent would.
+    // Every run carries the RoE. Direct runs also carry the agent's dossier,
+    // as the subagent would; Dann gets his definition from --agent, which
+    // does not preload skills, so the RoE is not otherwise in his context.
     let systemPrompt;
-    if (!orchestrated) {
-      try {
-        const dossier = await readFile(path.join(agentsDir, `${agent}.md`), "utf8");
-        const roe = await readFile(path.join(repoRoot, "RULES-OF-ENGAGEMENT.md"), "utf8");
-        systemPrompt = `${dossier}\n\n---\n\n${roe}`;
-      } catch (err) {
-        console.error(`[dossier] ${agent}:`, err.message);
-      }
+    try {
+      const roe = await readFile(path.join(repoRoot, "RULES-OF-ENGAGEMENT.md"), "utf8");
+      systemPrompt = orchestrated
+        ? roe
+        : `${await readFile(path.join(agentsDir, `${agent}.md`), "utf8")}\n\n---\n\n${roe}`;
+    } catch (err) {
+      console.error(`[dossier] ${agent}:`, err.message);
     }
 
     const id = crypto.randomUUID();
     const memoryAgents = orchestrated ? AGENTS : OWNERSHIP[agent] ? [agent] : [];
-    const mcpConfigPath = memoryAgents.length
-      ? writeMcpConfig(path.join(dataDir, "run-configs"), id, memoryAgents, dbFile)
+    const shared = loadSharedServer(repoRoot);
+    const mcpConfigPath = memoryAgents.length || shared
+      ? writeMcpConfig(path.join(dataDir, "run-configs"), id, memoryAgents, dbFile, shared)
       : undefined;
     const args = buildSessionArgs({
       tools,
       mcpConfigPath,
-      mcpTools: memoryAgents.flatMap(qualifiedToolsFor),
+      mcpTools: [...memoryAgents.flatMap(qualifiedToolsFor), ...(shared ? SHARED_READ_TOOLS : [])],
       agentDef: orchestrated ? ORCHESTRATOR : undefined,
       systemPrompt,
     });

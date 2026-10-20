@@ -123,8 +123,10 @@ describe("hub archives a run end to end", () => {
     expect(at("--agent")).toBe("dann-of-thursday");
     expect(argv).toContain("--strict-mcp-config");
     expect(at("--tools")).not.toMatch(/Bash/);
+    expect(at("--allowedTools")).toContain("mcp__pnd-notes__search_notes");
+    expect(at("--append-system-prompt")).toContain("Rules of Engagement");
     const config = JSON.parse(readFileSync(at("--mcp-config"), "utf8"));
-    expect(Object.keys(config.mcpServers).sort()).toEqual(AGENTS.map((a) => `ei-${a.split("-")[0]}`).sort());
+    expect(Object.keys(config.mcpServers).sort()).toEqual([...AGENTS.map((a) => `ei-${a.split("-")[0]}`), "pnd-notes"].sort());
     expect(config.mcpServers["ei-dahlia"].env.EI_RUN_ID).toBe(id);
     expect(config.mcpServers["ei-dahlia"].args).toContain("dahlia-of-wednesday");
   });
@@ -134,7 +136,7 @@ describe("hub archives a run end to end", () => {
     const argv = JSON.parse(readFileSync(argvFile, "utf8"));
     expect(argv).not.toContain("--agent");
     const config = JSON.parse(readFileSync(argv[argv.indexOf("--mcp-config") + 1], "utf8"));
-    expect(Object.keys(config.mcpServers)).toEqual(["ei-sin"]);
+    expect(Object.keys(config.mcpServers).sort()).toEqual(["ei-sin", "pnd-notes"]);
     expect(argv[argv.indexOf("--allowedTools") + 1]).toContain("mcp__ei-sin__save_exploit_analysis");
   });
 });

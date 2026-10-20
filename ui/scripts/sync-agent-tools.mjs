@@ -8,18 +8,10 @@ import { readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { AGENTS } from "../db/ownership.mjs";
-import { qualifiedToolsFor } from "../mcp/tool-names.mjs";
+import { qualifiedToolsFor, SHARED_READ_TOOLS } from "../mcp/tool-names.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 
-// Shared read-only knowledge base (pnd-notes), granted to every agent. These
-// tools only read curated notes — no writes, no target traffic — so they are
-// always safe. Server registered in .mcp.json. See ~/Git/r3dpnd/pnd-notes.
-const SHARED_READ_TOOLS = [
-  "mcp__pnd-notes__list_areas",
-  "mcp__pnd-notes__search_notes",
-  "mcp__pnd-notes__get_note",
-];
 
 for (const agent of AGENTS) {
   const policy = JSON.parse(readFileSync(path.join(ROOT, "agents", `${agent}.policy.json`), "utf8"));

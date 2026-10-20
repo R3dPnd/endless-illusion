@@ -1,7 +1,8 @@
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { serverName } from "../db/ownership.mjs";
+import { SHARED_SERVER } from "../mcp/tool-names.mjs";
 
 /**
  * argv for `claude -p`. `--tools` withholds tools from the session;
@@ -25,12 +26,28 @@ export function buildSessionArgs({ tools, mcpConfigPath, mcpTools = [], agentDef
 const MEMORY_SERVER = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "mcp", "ei-memory.mjs");
 
 /**
- * Write the per-run MCP config: one ei-memory instance per participating
- * agent, each pinned to that agent's identity and this run's id.
+ * The shared knowledge-base server entry from the repo's .mcp.json, or null
+ * when it is not registered. Runs use --strict-mcp-config, so it must be
+ * copied into each run's config to be reachable.
  */
-export function writeMcpConfig(dir, runId, agents, dbFile) {
+export function loadSharedServer(repoRoot) {
+  try {
+    const config = JSON.parse(readFileSync(path.join(repoRoot, ".mcp.json"), "utf8"));
+    return config.mcpServers?.[SHARED_SERVER] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Write the per-run MCP config: one ei-memory instance per participating
+ * agent, each pinned to that agent's identity and this run's id, plus the
+ * shared knowledge base when given.
+ */
+export function writeMcpConfig(dir, runId, agents, dbFile, shared = null) {
   mkdirSync(dir, { recursive: true, mode: 0o700 });
   const mcpServers = {};
+  if (shared) mcpServers[SHARED_SERVER] = shared;
   for (const agent of agents) {
     mcpServers[serverName(agent)] = {
       command: process.execPath,
