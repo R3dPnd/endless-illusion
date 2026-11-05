@@ -23,3 +23,8 @@ Thumbs.db
 
 # Hub database and per-run MCP configs (target data; never commit)
 data/
+
+# Python hub
+.venv/
+__pycache__/
+.pytest_cache/
