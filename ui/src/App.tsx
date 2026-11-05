@@ -1,7 +1,9 @@
 import { useState, type CSSProperties } from "react";
+import DisplaySettings from "./components/display/DisplaySettings";
 import { Banner, Tabs } from "./components/ui";
 import { useAgents } from "./hooks/useAgents";
 import { useBounties } from "./hooks/useBounties";
+import { useDisplay } from "./hooks/useDisplay";
 import { useHashRoute, type Route } from "./hooks/useHashRoute";
 import { useRun } from "./hooks/useRun";
 import ArchivePage from "./pages/ArchivePage";
@@ -17,6 +19,7 @@ const TABS: { id: Route; label: string }[] = [
 ];
 
 export default function App() {
+  const display = useDisplay();
   const agents = useAgents();
   const run = useRun();
   const [route, setRoute] = useHashRoute();
@@ -47,11 +50,12 @@ export default function App() {
   const agentColor = agents.selected ? speakerFor(agents.selected).color : undefined;
 
   return (
-    <div className="app" style={agentColor ? ({ "--agent": agentColor } as CSSProperties) : undefined}>
+    <div className={`app app--${route}`} style={agentColor ? ({ "--agent": agentColor } as CSSProperties) : undefined}>
       <header className="app__header">
         <h1>Endless Illusion</h1>
         <span className="subtitle">agent control plane · the Original Seven</span>
         <Tabs label="Sections" tabs={TABS} active={route} onChange={setRoute} />
+        <DisplaySettings d={display} />
       </header>
 
       {agents.error && <Banner>Could not load agents: {agents.error}. Is the server running on :8787?</Banner>}
