@@ -10,6 +10,8 @@ secrets/
 research/**/raw/
 research/**/evidence/*.har
 research/**/*.secret.*
+# Scope reviews reveal testing strategy; keep them local
+research/**/scope-review.md
 
 # OS / editor
 .DS_Store
