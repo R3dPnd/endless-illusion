@@ -1,6 +1,6 @@
 import type { Program, Proposal } from "../../types";
 import SpeakerChip from "../chat/SpeakerChip";
-import { Button } from "../ui";
+import { Button } from "pnd-lib-react";
 import ScopeList from "./ScopeList";
 
 interface Props {

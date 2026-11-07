@@ -1,5 +1,5 @@
 import { DELEGATE_TOOLS } from "../../chat";
-import { Chip } from "../ui";
+import { Chip } from "pnd-lib-react";
 import FeedRow from "./FeedRow";
 import ToolInput from "./ToolInput";
 
@@ -8,7 +8,7 @@ export default function ToolCallRow({ ts, name, input }: { ts: number; name: str
   return (
     <FeedRow ts={ts} variant={isTask ? "tool row--task" : "tool"}>
       <div>
-        <Chip tone={isTask ? "task" : "tool"}>{isTask ? "→ delegate" : name}</Chip>
+        <Chip tone={isTask ? "violet" : "cyan"}>{isTask ? "→ delegate" : name}</Chip>
         <ToolInput name={name} input={input} />
       </div>
     </FeedRow>

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { EmptyState } from "../ui";
+import { EmptyState } from "pnd-lib-react";
 
 interface Props {
   title: string;

@@ -1,5 +1,5 @@
 import type { CveNote } from "../../types";
-import { EmptyState } from "../ui";
+import { EmptyState } from "pnd-lib-react";
 
 export default function CveNotesTable({ notes }: { notes: CveNote[] }) {
   if (notes.length === 0) return <EmptyState>No CVE notes recorded yet.</EmptyState>;
@@ -30,8 +30,8 @@ export default function CveNotesTable({ notes }: { notes: CveNote[] }) {
               </td>
               <td className="cell-sub">{n.cvss ?? "—"}</td>
               <td>
-                {n.kev && <span className="chip chip--active">KEV</span>}
-                {n.public_exploit && <span className="chip chip--orch">public exploit</span>}
+                {n.kev && <span className="chip tone--orange">KEV</span>}
+                {n.public_exploit && <span className="chip tone--violet">public exploit</span>}
               </td>
               <td className="cell-sub">{n.created_at.slice(0, 10)}</td>
             </tr>

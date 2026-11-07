@@ -1,10 +1,7 @@
+import { getJson, postJson } from "pnd-lib-react";
 import type { AgentPolicy, Bounties, CveNote, Finding, RunEvent, RunSummary, StartRunResponse, Submission } from "./types";
 
-export async function getAgents(): Promise<AgentPolicy[]> {
-  const res = await fetch("/api/agents");
-  if (!res.ok) throw new Error(`GET /api/agents failed: ${res.status}`);
-  return res.json();
-}
+export const getAgents = () => getJson<AgentPolicy[]>("/api/agents");
 
 export interface StartRunBody {
   agent: string;
@@ -15,16 +12,7 @@ export interface StartRunBody {
   programId?: number;
 }
 
-export async function startRun(body: StartRunBody): Promise<StartRunResponse> {
-  const res = await fetch("/api/runs", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || `start failed: ${res.status}`);
-  return data;
-}
+export const startRun = (body: StartRunBody) => postJson<StartRunResponse>("/api/runs", body);
 
 export async function stopRun(id: string): Promise<void> {
   await fetch(`/api/runs/${id}/stop`, { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
@@ -58,20 +46,6 @@ export function openRunStream(
 }
 
 // ---- archive + bounties -----------------------------------------------------
-
-async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url);
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `GET ${url} failed: ${res.status}`);
-  return data as T;
-}
-
-async function postJson<T>(url: string, body: unknown = {}): Promise<T> {
-  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || `POST ${url} failed: ${res.status}`);
-  return data as T;
-}
 
 export const listRuns = (params: { agent?: string; status?: string; q?: string } = {}) => {
   const qs = new URLSearchParams(Object.entries(params).filter(([, v]) => v) as [string, string][]).toString();

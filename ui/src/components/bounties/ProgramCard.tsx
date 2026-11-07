@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { Program } from "../../types";
-import { Button } from "../ui";
+import { Button } from "pnd-lib-react";
 import ExternalLink from "./ExternalLink";
 import ProposalReview from "./ProposalReview";
 
@@ -19,7 +19,7 @@ export default function ProgramCard({ program, onAskSen, onConfirm, onReject }: 
       <div className="card__top">
         <span className="cell-title">{program.name}</span>
         {program.platform && <span className="chip">{program.platform}</span>}
-        <span className="chip chip--muted">{program.source}</span>
+        <span className="chip tone--muted">{program.source}</span>
       </div>
       <ExternalLink href={program.url} />
       <div className="card__actions">

@@ -1,5 +1,5 @@
 import type { ConfirmedProgram } from "../../types";
-import { Button } from "../ui";
+import { Button } from "pnd-lib-react";
 import ExternalLink from "./ExternalLink";
 import ScopeList from "./ScopeList";
 
@@ -10,7 +10,7 @@ export default function ConfirmedCard({ program, onUse }: { program: ConfirmedPr
       <div className="card__top">
         <span className="cell-title">{program.name}</span>
         {program.platform && <span className="chip">{program.platform}</span>}
-        {snapshot.stale && <span className="chip chip--active">re-verify scope</span>}
+        {snapshot.stale && <span className="chip tone--orange">re-verify scope</span>}
       </div>
       <ExternalLink href={program.url} />
       <div className="cell-sub">

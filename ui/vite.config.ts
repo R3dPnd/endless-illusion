@@ -3,6 +3,8 @@ import react from "@vitejs/plugin-react";
 
 export default defineConfig({
   plugins: [react()],
+  // A linked (file:) pnd-lib-react would otherwise pull in its own React copy.
+  resolve: { dedupe: ["react", "react-dom"] },
   server: {
     port: 5173,
     proxy: {
