@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Button, TextField, TextInput } from "../ui";
+import { Button, TextField, TextInput } from "pnd-lib-react";
 
 interface Props {
   onAdd: (p: { name: string; url: string; platform?: string; policyText?: string }) => Promise<void>;

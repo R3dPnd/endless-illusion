@@ -3,7 +3,7 @@ import { authorizationText, scopeText } from "../../bounties";
 import type { AgentPolicy, ConfirmedProgram } from "../../types";
 import type { RunRequest } from "../../hooks/useRun";
 import { canGoActive, prettyName } from "../../util";
-import { Button, EmptyState, TextField } from "../ui";
+import { Button, EmptyState, TextField } from "pnd-lib-react";
 import ActiveGate from "./ActiveGate";
 import GateStatus from "./GateStatus";
 import ProgramPicker from "./ProgramPicker";

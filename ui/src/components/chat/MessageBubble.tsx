@@ -1,7 +1,7 @@
 import { useState, type CSSProperties } from "react";
 import type { ChatMessage } from "../../chat";
 import { speakerFor } from "../../speakers";
-import { Avatar, Button } from "../ui";
+import { Avatar, Button } from "pnd-lib-react";
 import MessageHeader from "./MessageHeader";
 
 const COLLAPSE_AT = 360;
@@ -20,7 +20,7 @@ export default function MessageBubble({ m }: { m: ChatMessage }) {
       className={`msg msg--${m.kind} ${mine ? "msg--mine" : ""} ${m.isError ? "is-error" : ""}`}
       style={{ "--who": from.color, "--to": to?.color ?? from.color } as CSSProperties}
     >
-      <Avatar speaker={from} />
+      <Avatar name={from.name} color={from.color} title={from.source} />
       <div className="msg__body">
         <MessageHeader m={m} from={from} to={to} />
         <div className="bubble md">{text}</div>

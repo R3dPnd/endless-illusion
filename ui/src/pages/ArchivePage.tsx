@@ -5,8 +5,7 @@ import FindingsTable from "../components/archive/FindingsTable";
 import RunList from "../components/archive/RunList";
 import RunReplay from "../components/archive/RunReplay";
 import SubmissionsList from "../components/archive/SubmissionsList";
-import { Banner, EmptyState, Panel, Select, Tabs, TextInput } from "../components/ui";
-import { useLoad } from "../hooks/useLoad";
+import { Banner, EmptyState, Panel, Select, Tabs, TextInput, useLoad } from "pnd-lib-react";
 import type { AgentPolicy } from "../types";
 import { prettyName } from "../util";
 

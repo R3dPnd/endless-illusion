@@ -1,5 +1,5 @@
 import type { ConfirmedProgram } from "../../types";
-import { Select } from "../ui";
+import { Select } from "pnd-lib-react";
 
 interface Props {
   programs: ConfirmedProgram[];

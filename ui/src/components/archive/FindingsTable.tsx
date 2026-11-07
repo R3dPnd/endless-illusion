@@ -1,6 +1,6 @@
 import type { Finding } from "../../types";
 import SpeakerChip from "../chat/SpeakerChip";
-import { EmptyState } from "../ui";
+import { EmptyState } from "pnd-lib-react";
 import SeverityChip from "./SeverityChip";
 
 export default function FindingsTable({ findings }: { findings: Finding[] }) {

@@ -1,6 +1,6 @@
 import type { ChatMessage } from "../../chat";
 import type { Speaker } from "../../speakers";
-import { Timestamp } from "../ui";
+import { Timestamp } from "pnd-lib-react";
 
 const KIND_LABEL: Partial<Record<ChatMessage["kind"], string>> = {
   handoff: "hand-off",

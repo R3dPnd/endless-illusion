@@ -3,7 +3,7 @@ import BountyColumn from "../components/bounties/BountyColumn";
 import ConfirmedCard from "../components/bounties/ConfirmedCard";
 import LeadCard from "../components/bounties/LeadCard";
 import ProgramCard from "../components/bounties/ProgramCard";
-import { Banner, EmptyState, Panel } from "../components/ui";
+import { Banner, EmptyState, Panel } from "pnd-lib-react";
 import type { useBounties } from "../hooks/useBounties";
 import type { Program } from "../types";
 

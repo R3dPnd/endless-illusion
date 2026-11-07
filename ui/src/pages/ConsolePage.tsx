@@ -2,7 +2,7 @@ import AgentPicker from "../components/agents/AgentPicker";
 import ChatRoom from "../components/chat/ChatRoom";
 import RunMonitor from "../components/monitor/RunMonitor";
 import RunForm from "../components/run/RunForm";
-import { Panel } from "../components/ui";
+import { Panel } from "pnd-lib-react";
 import type { useAgents } from "../hooks/useAgents";
 import type { useRun } from "../hooks/useRun";
 import type { ConfirmedProgram } from "../types";

@@ -1,13 +1,14 @@
 import { useEffect, useRef } from "react";
 import type { Chat } from "../../chat";
-import { CopyButton, EmptyState } from "../ui";
+import { CopyButton, EmptyState, TypingIndicator } from "pnd-lib-react";
+import { speakerFor } from "../../speakers";
 import MessageBubble from "./MessageBubble";
 import Roster from "./Roster";
-import TypingIndicator from "./TypingIndicator";
 
 export default function ChatRoom({ chat, status }: { chat: Chat; status: string }) {
   const { messages, active, finalText } = chat;
   const running = status === "running";
+  const typing = running && active ? speakerFor(active) : null;
   const scrollRef = useRef<HTMLDivElement>(null);
   const pinned = useRef(true);
 
@@ -26,7 +27,7 @@ export default function ChatRoom({ chat, status }: { chat: Chat; status: string 
     <div className="chat">
       <div className="toolbar">
         <Roster messages={messages} active={running ? active : undefined} />
-        {finalText && <CopyButton text={finalText} label="Copy final" />}
+        {finalText && <CopyButton text={finalText} label="Copy final" className="push-right" />}
       </div>
       <div className="chat__scroll" ref={scrollRef} onScroll={onScroll}>
         {messages.length === 0 ? (
@@ -34,7 +35,7 @@ export default function ChatRoom({ chat, status }: { chat: Chat; status: string 
         ) : (
           messages.map((m) => <MessageBubble key={m.key} m={m} />)
         )}
-        {running && active && <TypingIndicator id={active} />}
+        {typing && <TypingIndicator name={typing.name} color={typing.color} />}
       </div>
     </div>
   );
