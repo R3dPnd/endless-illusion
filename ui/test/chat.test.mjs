@@ -4,10 +4,11 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildChat } from "../src/chat.ts";
 
-const HERE = path.dirname(fileURLToPath(import.meta.url));
+// Recorded claude streams, shared with the hub tests (tests/fixtures at the repo root).
+const FIXTURES = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "tests", "fixtures");
 const events = (file) => [
   { kind: "meta", agent: "dann-of-thursday", orchestrated: true, activeEngaged: false, tools: [], ts: 0 },
-  ...readFileSync(path.join(HERE, "fixtures", file), "utf8").trim().split("\n").map((l, i) => ({ kind: "claude", data: JSON.parse(l), ts: i + 1 })),
+  ...readFileSync(path.join(FIXTURES, file), "utf8").trim().split("\n").map((l, i) => ({ kind: "claude", data: JSON.parse(l), ts: i + 1 })),
 ];
 
 describe("buildChat", () => {

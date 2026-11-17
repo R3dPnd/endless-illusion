@@ -1,3 +1,4 @@
+import type { Tone } from "pnd-lib-react";
 import type { AgentPolicy } from "./types";
 
 export function prettyName(agent: string): string {
@@ -7,19 +8,15 @@ export function prettyName(agent: string): string {
     .join(" ");
 }
 
-/** CSS modifier for the classification badge. */
-export function classTag(classification: string): string {
-  if (classification.includes("active")) return "active";
-  if (classification.includes("passive")) return "passive";
-  if (classification.includes("orchestr")) return "orch";
+/** Tag color for an agent's classification. */
+export function classTag(classification: string): Tone {
+  if (classification.includes("active")) return "orange";
+  if (classification.includes("passive")) return "green";
+  if (classification.includes("orchestr")) return "violet";
   return "muted";
 }
 
 /** Whether this agent can ever run active (Bash) tooling. */
 export function canGoActive(a: AgentPolicy | undefined): boolean {
   return !!a && Array.isArray(a.tools?.authorized_active) && a.tools.authorized_active.length > 0;
-}
-
-export function fmtTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString();
 }

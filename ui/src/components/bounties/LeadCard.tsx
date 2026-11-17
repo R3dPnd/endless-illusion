@@ -1,6 +1,6 @@
 import type { Lead } from "../../types";
 import SpeakerChip from "../chat/SpeakerChip";
-import { Button } from "../ui";
+import { Button } from "pnd-lib-react";
 import ExternalLink from "./ExternalLink";
 
 interface Props {
@@ -15,7 +15,7 @@ export default function LeadCard({ lead, onTrack, onDismiss }: Props) {
       <div className="card__top">
         <span className="cell-title">{lead.name}</span>
         {lead.platform && <span className="chip">{lead.platform}</span>}
-        <span className="chip chip--muted">
+        <span className="chip tone--muted">
           {lead.sightings} sighting{lead.sightings === 1 ? "" : "s"}
         </span>
       </div>
@@ -26,7 +26,7 @@ export default function LeadCard({ lead, onTrack, onDismiss }: Props) {
       <div className="cell-sub">via {lead.foundVia}</div>
       {lead.scopeSummary && (
         <p className="bounty-card__unverified">
-          <span className="chip chip--active">unverified</span> {lead.scopeSummary}
+          <span className="chip tone--orange">unverified</span> {lead.scopeSummary}
         </p>
       )}
       <div className="card__actions">

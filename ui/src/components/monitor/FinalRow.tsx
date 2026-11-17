@@ -1,5 +1,5 @@
 import type { ClaudeEvent } from "../../types";
-import { Chip } from "../ui";
+import { Chip } from "pnd-lib-react";
 import FeedRow from "./FeedRow";
 
 /** Run summary; the response text itself lives in the Channel. */
@@ -17,7 +17,7 @@ export default function FinalRow({ ts, data }: { ts: number; data: ClaudeEvent }
           {typeof data.num_turns === "number" && <span>{data.num_turns} turns</span>}
           <span>subagents: {spawned}</span>
           {Object.entries(byType).map(([k, v]) => (
-            <Chip key={k} tone="orch">
+            <Chip key={k} tone="violet">
               {k}×{v}
             </Chip>
           ))}

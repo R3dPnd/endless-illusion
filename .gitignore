@@ -10,6 +10,8 @@ secrets/
 research/**/raw/
 research/**/evidence/*.har
 research/**/*.secret.*
+# Scope reviews reveal testing strategy; keep them local
+research/**/scope-review.md
 
 # OS / editor
 .DS_Store
@@ -23,3 +25,8 @@ Thumbs.db
 
 # Hub database and per-run MCP configs (target data; never commit)
 data/
+
+# Python hub
+.venv/
+__pycache__/
+.pytest_cache/

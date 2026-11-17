@@ -2,7 +2,7 @@
   "mcpServers": {
     "pnd-notes": {
       "command": "node",
-      "args": ["/Users/prestonharms/Git/r3dpnd/pnd-notes/server/pnd-notes.mjs"]
+      "args": ["../pnd-notes/server/pnd-notes.mjs"]
     }
   }
 }

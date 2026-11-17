@@ -1,6 +1,6 @@
 import { exportSubmissionUrl } from "../../api";
 import type { Submission } from "../../types";
-import { EmptyState } from "../ui";
+import { EmptyState } from "pnd-lib-react";
 import SeverityChip from "./SeverityChip";
 
 export default function SubmissionsList({ submissions }: { submissions: Submission[] }) {

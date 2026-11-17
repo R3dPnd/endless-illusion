@@ -1,5 +1,5 @@
 import type { ClaudeEvent } from "../../types";
-import { Chip } from "../ui";
+import { Chip } from "pnd-lib-react";
 import FeedRow from "./FeedRow";
 import FinalRow from "./FinalRow";
 import ToolCallRow from "./ToolCallRow";

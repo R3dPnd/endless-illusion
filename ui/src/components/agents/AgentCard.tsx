@@ -2,7 +2,7 @@ import type { CSSProperties } from "react";
 import type { AgentPolicy } from "../../types";
 import { speakerFor } from "../../speakers";
 import { classTag, prettyName } from "../../util";
-import { Tag } from "../ui";
+import { Tag } from "pnd-lib-react";
 
 interface Props {
   agent: AgentPolicy;

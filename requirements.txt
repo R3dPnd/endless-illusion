@@ -1,0 +1,3 @@
+# Endless Illusion hub (desktop shell + server). Install into .venv: python pnd.py does it for you.
+pywebview>=6.2
+pytest>=9.1

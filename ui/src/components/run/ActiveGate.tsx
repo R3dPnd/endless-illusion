@@ -1,4 +1,4 @@
-import { Checkbox } from "../ui";
+import { Checkbox } from "pnd-lib-react";
 import GateStatus from "./GateStatus";
 
 interface Props {

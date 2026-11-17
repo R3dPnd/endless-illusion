@@ -1,5 +1,5 @@
 import type { RunEvent } from "../../types";
-import { Chip } from "../ui";
+import { Chip } from "pnd-lib-react";
 import ClaudeRow from "./ClaudeRow";
 import FeedRow from "./FeedRow";
 
@@ -10,8 +10,8 @@ export default function EventRow({ evt }: { evt: RunEvent }) {
         <FeedRow ts={evt.ts} variant="meta">
           <div>
             <strong>Dispatched: {evt.agent}</strong>
-            {evt.orchestrated && <Chip tone="orch">orchestrated</Chip>}
-            {evt.activeEngaged ? <Chip tone="active">active tools</Chip> : <Chip tone="safe">passive tools</Chip>}
+            {evt.orchestrated && <Chip tone="violet">orchestrated</Chip>}
+            {evt.activeEngaged ? <Chip tone="orange">active tools</Chip> : <Chip tone="green">passive tools</Chip>}
             <div className="tools">tools: {evt.tools.join(", ")}</div>
           </div>
         </FeedRow>

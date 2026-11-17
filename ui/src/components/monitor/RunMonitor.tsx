@@ -1,5 +1,5 @@
 import type { RunEvent } from "../../types";
-import { Button, EmptyState, StatusBadge } from "../ui";
+import { Button, EmptyState, StatusBadge } from "pnd-lib-react";
 import EventRow from "./EventRow";
 
 interface Props {
