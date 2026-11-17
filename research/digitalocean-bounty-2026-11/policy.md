@@ -113,6 +113,18 @@ SnapShooter is a cloud backup and recovery solution.
 
 - typeId: None | bountyTierId: None
 
+Assets in this group (9):
+
+- `https://github.com/digitalocean/do-agent` (bountyTierId 1): A daemon that helps collect system metrics from droplets
+- `https://github.com/digitalocean/droplet-agent` (bountyTierId 1): A daemon that enables web console access on droplets
+- `https://github.com/digitalocean/doctl` (bountyTierId 1): The official command line interface for the DigitalOcean API
+- `https://github.com/digitalocean/action-doctl` (bountyTierId 5): GitHub Actions for DigitalOcean - doctl
+- `https://github.com/digitalocean/godo` (bountyTierId 5): DigitalOcean's Go API client
+- `https://github.com/digitalocean/pydo` (bountyTierId 5): DigitalOcean's Python API client
+- `https://github.com/digitalocean/terraform-provider-digitalocean` (bountyTierId 5): DigitalOcean's official Terraform provider
+- `https://github.com/digitalocean/go-nbd` (bountyTierId 5): Golang-only network block device client
+- `https://github.com/digitalocean/do-markdownit` (bountyTierId 5): Markdown plugin run against all user-submitted content on https://digitalocean.com/community
+
 ### `*.digitalocean.com Out of Scope Subdomains`
 
 - typeId: None | bountyTierId: None
@@ -126,17 +138,82 @@ Please note that `digitalocean.com/community/*` is a set of 3rd party tools buil
 
 **The following subdomains are out of scope:**
 
+Assets in this group (20):
+
+- `anchor.digitalocean.com` (bountyTierId 5)
+- `brand.digitalocean.com` (bountyTierId 5)
+- `cloudsupport.digitalocean.com` (bountyTierId 5)
+- `deploy.digitalocean.com` (bountyTierId 5)
+- `email.digitalocean.com` (bountyTierId 5)
+- `events.digitalocean.com` (bountyTierId 5)
+- `go.digitalocean.com` (bountyTierId 5)
+- `groove.digitalocean.com` (bountyTierId 5)
+- `helpdesk.digitalocean.com` (bountyTierId 5)
+- `ideas.digitalocean.com` (bountyTierId 5)
+- `investor.digitalocean.com` (bountyTierId 5)
+- `investors.digitalocean.com` (bountyTierId 5)
+- `ir.digitalocean.com` (bountyTierId 5)
+- `mirrors.digitalocean.com` (bountyTierId 5)
+- `pilot.digitalocean.com` (bountyTierId 5)
+- `rewards.digitalocean.com` (bountyTierId 5)
+- `segment.digitalocean.com` (bountyTierId 5)
+- `status.digitalocean.com` (bountyTierId 5)
+- `tracking.digitalocean.com` (bountyTierId 5)
+- `waves.digitalocean.com` (bountyTierId 5)
+
 ### `Out of Scope: Customer Resources`
 
 - typeId: None | bountyTierId: None
 
 These are customer-managed resources that are all out-of-scope.
 
+Assets in this group (9):
+
+- `*.db.ondigitalocean.com` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any database created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+
+Findings in Standard Edition PostgreSQL, Standard Edition MySQL, Valkey, Kafka, and OpenSearch should be submitted to [our partner, Aiven](https://bugcrowd.com/engagements/aiven-mbb-og).
+- `*.db1.ondigitalocean.com` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any database created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+
+Findings in Standard Edition PostgreSQL, Standard Edition MySQL, Valkey, Kafka, and OpenSearch should be submitted to [our partner, Aiven](https://bugcrowd.com/engagements/aiven-mbb-og).
+- `*.digitaloceanspaces.com` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any Spaces buckets created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+- `*.doserverless.co` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any Functions created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+- `*.k8s.ondigitalocean.com` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any Kubernetes clusters created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+- `*.ondigitalocean.app` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any Apps created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+- `registry.digitalocean.com/*` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope.
+
+Any container registries created inside your own account on this domain are considered in-scope. Use the `cloud.digitalocean.com` asset in that case.
+- `*.agents-internal.do-ai.run` (bountyTierId 5): Customers' resources are hosted underneath this domain, so the entire domain should be considered out-of-scope. 
+
+Customer-deployed agents at `adk-agent-{id}.agents-internal.do-ai.run` are OOS. Any AI agents created inside your own account on this domain are considered in-scope (with the exclusion of agent model vulnerabilities). Use the `cloud.digitalocean.com` asset in that case.
+- `Assets created by other DigitalOcean customers` (bountyTierId 5): **Any asset (Droplet, Space, or otherwise) created by other DigitalOcean customers are not to be tested under any circumstances.**
+
 ### `Out of Scope`
 
 - typeId: None | bountyTierId: None
 
 These are general DigitalOcean out-of-scope assets.
+
+Assets in this group (5):
+
+- `*.doserverless-dev3.io` (bountyTierId 5)
+- `*.ondbaasdev.com` (bountyTierId 5)
+- `*.onstagingocean.app` (bountyTierId 5)
+- `Marketplace Apps and Add-Ons` (bountyTierId 5): The marketplace applications and add-ons are maintained by our partnered vendors. 
+Security issues against these components of the marketplace are not in the scope of this program and ineligible for bounty rewards, but we are happy to help facilitate communications to the application owners.
+Please reach out to us at security@digitalocean.com for facilitation.
+- `Other DigitalOcean open source projects not listed` (bountyTierId 5): All open source projects hosted by DigitalOcean not otherwise listed as in-scope are out-of-scope.
 
 
 ## In scope (version 2026-08-14 15:20 UTC)
