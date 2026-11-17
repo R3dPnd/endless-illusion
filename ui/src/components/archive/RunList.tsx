@@ -1,7 +1,6 @@
 import type { RunSummary } from "../../types";
-import { fmtTime } from "../../util";
 import SpeakerChip from "../chat/SpeakerChip";
-import { EmptyState, StatusBadge } from "../ui";
+import { EmptyState, fmtTime, StatusBadge } from "pnd-lib-react";
 
 interface Props {
   runs: RunSummary[];
@@ -21,8 +20,8 @@ export default function RunList({ runs, selected, onSelect }: Props) {
             <span className="run-row__top">
               <SpeakerChip id={r.agent} />
               <StatusBadge status={r.status} />
-              {r.active_engaged && <span className="chip chip--active">active</span>}
-              {r.program_id != null && <span className="chip chip--orch">program #{r.program_id}</span>}
+              {r.active_engaged && <span className="chip tone--orange">active</span>}
+              {r.program_id != null && <span className="chip tone--violet">program #{r.program_id}</span>}
             </span>
             <span className="run-row__task">{r.task}</span>
             <span className="run-row__meta">

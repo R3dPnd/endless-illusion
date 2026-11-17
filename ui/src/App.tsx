@@ -1,16 +1,17 @@
 import { useState, type CSSProperties } from "react";
-import DisplaySettings from "./components/display/DisplaySettings";
-import { Banner, Tabs } from "./components/ui";
+import { Banner, DisplaySettings, Tabs, useDisplay, useHashRoute } from "pnd-lib-react";
+import { displayHost } from "./displayHost";
 import { useAgents } from "./hooks/useAgents";
 import { useBounties } from "./hooks/useBounties";
-import { useDisplay } from "./hooks/useDisplay";
-import { useHashRoute, type Route } from "./hooks/useHashRoute";
 import { useRun } from "./hooks/useRun";
 import ArchivePage from "./pages/ArchivePage";
 import BountiesPage from "./pages/BountiesPage";
 import ConsolePage from "./pages/ConsolePage";
 import { speakerFor } from "./speakers";
 import type { Program } from "./types";
+
+const ROUTES = ["console", "bounties", "archive"] as const;
+type Route = (typeof ROUTES)[number];
 
 const TABS: { id: Route; label: string }[] = [
   { id: "console", label: "Console" },
@@ -19,10 +20,10 @@ const TABS: { id: Route; label: string }[] = [
 ];
 
 export default function App() {
-  const display = useDisplay();
+  const display = useDisplay(displayHost);
   const agents = useAgents();
   const run = useRun();
-  const [route, setRoute] = useHashRoute();
+  const [route, setRoute] = useHashRoute(ROUTES);
   const bounties = useBounties(run.busy);
   const [programId, setProgramId] = useState<number | null>(null);
 
@@ -50,7 +51,7 @@ export default function App() {
   const agentColor = agents.selected ? speakerFor(agents.selected).color : undefined;
 
   return (
-    <div className={`app app--${route}`} style={agentColor ? ({ "--agent": agentColor } as CSSProperties) : undefined}>
+    <div className={`app app--${route}`} style={agentColor ? ({ "--accent": agentColor } as CSSProperties) : undefined}>
       <header className="app__header">
         <h1>Endless Illusion</h1>
         <span className="subtitle">agent control plane · the Original Seven</span>
