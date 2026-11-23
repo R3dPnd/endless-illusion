@@ -10,6 +10,8 @@ export interface StartRunBody {
   authorization?: string;
   enableActive?: boolean;
   programId?: number;
+  /** Reply into this finished run's claude session; the hub inherits its agent, scope, authorization, and tools. */
+  continueRun?: string;
 }
 
 export const startRun = (body: StartRunBody) => postJson<StartRunResponse>("/api/runs", body);

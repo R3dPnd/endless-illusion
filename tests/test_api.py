@@ -214,3 +214,61 @@ def test_serves_the_built_client_with_spa_fallback(tmp_path):
         assert "app" in text
     finally:
         server.shutdown()
+
+
+# ---- bounty board details ----
+
+
+def test_shows_agent_supplied_bounty_details_on_the_board(api):
+    hub, client = api
+    insert_agent_row(hub.db, "saudade-of-sunday", "seed", "program_leads", {
+        "name": "Gamma", "url": "https://hackerone.com/gamma", "found_via": "HackerOne directory",
+        "program_type": "bounty", "rewards": "$100 – $10,000", "max_reward_usd": 10000,
+        "asset_types": ["web", "api"], "details": "Payments platform.", "sources": ["https://hackerone.com/gamma"]})
+    # A later, sparser sighting refreshes what it supplies and keeps the rest.
+    insert_agent_row(hub.db, "dahlia-of-wednesday", "seed", "program_leads", {
+        "name": "Gamma", "url": "https://hackerone.com/gamma", "found_via": "advisory", "rewards": "$150 – $12,000"})
+    entry = next(x for x in client.get("/api/bounties")[1]["leads"] if x["normalizedUrl"] == "hackerone.com/gamma")
+    assert entry["rewards"] == "$150 – $12,000"
+    assert entry["maxRewardUsd"] == 10000
+    assert entry["assetTypes"] == ["web", "api"]
+    assert entry["details"] == "Payments platform."
+    assert entry["programType"] == "bounty"
+    assert entry["sightings"] == 2
+
+
+def test_a_tracked_program_keeps_its_lead_details(api):
+    hub, client = api
+    insert_agent_row(hub.db, "saudade-of-sunday", "seed", "program_leads", {
+        "name": "Delta", "url": "https://bugcrowd.com/delta", "found_via": "Bugcrowd", "asset_types": ["mobile"], "details": "Mobile bank."})
+    assert client.post("/api/leads/track", {"normalizedUrl": "bugcrowd.com/delta"})[0] == 200
+    program = next(p for p in client.get("/api/bounties")[1]["tracked"] if p["name"] == "Delta")
+    assert program["assetTypes"] == ["mobile"]
+    assert program["details"] == "Mobile bank."
+
+
+def test_a_manual_program_has_empty_board_details(api):
+    _, client = api
+    assert client.post("/api/programs", {"name": "Manual Zeta", "url": "https://zeta.example/security"})[0] == 200
+    program = next(p for p in client.get("/api/bounties")[1]["tracked"] if p["name"] == "Manual Zeta")
+    assert program["assetTypes"] == [] and program["details"] is None and program["scopeSummary"] == ""
+
+
+def test_serves_oddly_shaped_proposals_in_one_shape(api):
+    hub, client = api
+    pid = tracked_program(hub, client, "Theta", "https://intigriti.com/theta")
+    insert_agent_row(hub.db, "sen-of-saturday", "seed", "scope_proposals", {
+        "program_id": pid,
+        "in_scope": [{"asset": "api.theta.example", "type": "url", "pays": "USD 100-10,000"}],
+        "out_of_scope": ["status.theta.example"],
+        "exclusions": {"conduct": ["No DoS", "Own accounts only"]},
+    })
+    program = next(p for p in client.get("/api/bounties")[1]["tracked"] if p["id"] == pid)
+    proposal = program["proposals"][0]
+    assert proposal["inScope"] == [{"asset": "api.theta.example", "type": "url", "notes": "pays: USD 100-10,000"}]
+    assert proposal["outOfScope"] == [{"asset": "status.theta.example"}]
+    assert proposal["exclusions"] == ["conduct: No DoS", "conduct: Own accounts only"]
+    # Confirming keeps the agent's JSON as stored, and the snapshot reads back in the same canonical shape.
+    assert client.post(f"/api/proposals/{proposal['id']}/confirm", {})[0] == 200
+    confirmed = next(p for p in client.get("/api/bounties")[1]["confirmed"] if p["id"] == pid)
+    assert confirmed["snapshot"]["exclusions"] == ["conduct: No DoS", "conduct: Own accounts only"]

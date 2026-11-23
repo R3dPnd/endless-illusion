@@ -70,10 +70,12 @@ def test_clean_report_strips_the_handback_frame_and_keeps_stats():
 def hub(tmp_path_factory):
     work = tmp_path_factory.mktemp("hub")
     os.environ["FAKE_ARGV_FILE"] = str(work / "argv.json")
+    os.environ["FAKE_STDIN_FILE"] = str(work / "stdin.txt")
     hub, server, client = start_hub(work)
     yield hub, client, work / "argv.json"
     server.shutdown()
     os.environ.pop("FAKE_ARGV_FILE", None)
+    os.environ.pop("FAKE_STDIN_FILE", None)
 
 
 def run_to_completion(hub, client, body):
@@ -151,3 +153,56 @@ def test_streams_a_live_run_over_server_sent_events(hub):
     assert '"kind":"meta"' in text
     assert '"kind":"closed"' in text
     assert text.rstrip().endswith("event: done\ndata: {}")
+
+
+# ---- follow-ups: replying in the chat resumes the previous run's session ----
+
+
+def test_a_follow_up_resumes_the_session_and_inherits_scope_and_tools(hub):
+    h, client, argv_file = hub
+    first = run_to_completion(h, client, {"agent": "sin-of-friday", "task": "x", "scope": "app.example.com", "authorization": "SOW-1"})
+    # Whatever the reply claims about agent, scope, or active tooling is ignored.
+    reply = run_to_completion(
+        h, client, {"continueRun": first, "task": "Go deeper on the preconditions", "agent": "dann-of-thursday", "authorization": "", "enableActive": True}
+    )
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    assert argv[argv.index("--resume") + 1] == "sess-1"
+    assert "--agent" not in argv
+    run = get_run(h.db, reply)
+    assert (run["agent"], run["scope"], run["authorization"], run["parent_run_id"]) == ("sin-of-friday", "app.example.com", "SOW-1", first)
+    assert run["tools"] == get_run(h.db, first)["tools"]
+    assert run["active_engaged"] is False
+    prompt = (argv_file.parent / "stdin.txt").read_text(encoding="utf8")
+    assert "Go deeper on the preconditions" in prompt
+    assert "SCOPE:" not in prompt
+
+
+def test_a_follow_up_survives_a_hub_restart(hub):
+    h, client, argv_file = hub
+    first = run_to_completion(h, client, {"agent": "sin-of-friday", "task": "x"})
+    h.runner.live.pop(first)  # as after a restart: only the archive knows the session
+    run_to_completion(h, client, {"continueRun": first, "task": "and then?"})
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    assert argv[argv.index("--resume") + 1] == "sess-1"
+
+
+def test_refuses_to_continue_an_unknown_or_sessionless_run(hub):
+    h, client, _ = hub
+    assert client.post("/api/runs", {"continueRun": "no-such-run", "task": "x"})[0] == 400
+    os.environ["FAKE_FIXTURE"] = "run-events-handback.jsonl"  # its stream reports no session id
+    try:
+        first = run_to_completion(h, client, {"agent": "sin-of-friday", "task": "x"})
+    finally:
+        os.environ.pop("FAKE_FIXTURE", None)
+    status, body = client.post("/api/runs", {"continueRun": first, "task": "x"})
+    assert status == 400 and "session" in body["error"]
+
+
+def test_a_direct_run_carries_the_skills_its_definition_preloads(hub):
+    h, client, argv_file = hub
+    run_to_completion(h, client, {"agent": "saudade-of-sunday", "task": "x"})
+    argv = json.loads(argv_file.read_text(encoding="utf8"))
+    prompt = argv[argv.index("--append-system-prompt") + 1]
+    assert "# Skill: bounty-scout" in prompt and "record_program_lead" in prompt
+    assert "# Skill: roe-quickref" in prompt
+    assert "name: bounty-scout" not in prompt  # frontmatter stripped

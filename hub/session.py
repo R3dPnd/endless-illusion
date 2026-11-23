@@ -10,7 +10,7 @@ from .tool_names import SHARED_SERVER
 MEMORY_SERVER = HUB_DIR / "memory.py"
 
 
-def build_session_args(tools, mcp_config_path=None, mcp_tools=(), agent_def=None, system_prompt=None):
+def build_session_args(tools, mcp_config_path=None, mcp_tools=(), agent_def=None, system_prompt=None, resume=None):
     """
     argv for `claude -p`. `--tools` withholds tools from the session;
     `--allowedTools` only pre-approves them, so it is never the restriction.
@@ -23,6 +23,8 @@ def build_session_args(tools, mcp_config_path=None, mcp_tools=(), agent_def=None
         args += ["--agent", agent_def]
     if system_prompt:
         args += ["--append-system-prompt", system_prompt]
+    if resume:
+        args += ["--resume", resume]
     return args
 
 

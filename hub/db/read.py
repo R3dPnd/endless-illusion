@@ -6,6 +6,8 @@ append-only, so "current" rows are those no later row supersedes.
 import json
 import re
 
+from .scope import exclusion_lines, scope_items
+
 MAX_FIELD = 4000
 
 SEARCH_SOURCES = {
@@ -129,9 +131,9 @@ def latest_snapshot(db, program_id):
     return {
         "id": snap["id"],
         "proposal_id": snap["proposal_id"],
-        "in_scope": parse_json(snap["in_scope"], []),
-        "out_of_scope": parse_json(snap["out_of_scope"], []),
-        "exclusions": parse_json(snap["exclusions"], []),
+        "in_scope": scope_items(parse_json(snap["in_scope"], [])),
+        "out_of_scope": scope_items(parse_json(snap["out_of_scope"], [])),
+        "exclusions": exclusion_lines(parse_json(snap["exclusions"], [])),
         "confirmed_at": snap["confirmed_at"],
     }
 
@@ -147,12 +149,37 @@ def get_scope(db, program_ref):
     }
 
 
+# Bounty-board details. Each comes from the latest sighting that supplied it, so a
+# later, sparser record_program_lead call doesn't blank out earlier research.
+LEAD_DETAIL_COLUMNS = ("program_type", "rewards", "max_reward_usd", "asset_types", "details", "program_updated", "sources")
+LEAD_JSON_COLUMNS = ("asset_types", "sources")
+
+
+def _latest(col):
+    return f"""(SELECT x.{col} FROM program_leads x
+               WHERE x.normalized_url = l.normalized_url AND x.{col} IS NOT NULL AND x.{col} <> ''
+               ORDER BY x.id DESC LIMIT 1) AS {col}"""
+
+
+def lead_profile(db, normalized_url):
+    """The merged bounty-board details for one program URL (lead or tracked), or None if no agent recorded it."""
+    row = db.get(
+        f"""SELECT {", ".join(_latest(c) for c in ("scope_summary", *LEAD_DETAIL_COLUMNS))}
+            FROM program_leads l WHERE l.normalized_url = ? ORDER BY l.id DESC LIMIT 1""",
+        normalized_url,
+    )
+    if not row:
+        return None
+    return {**row, **{c: parse_json(row[c], []) for c in LEAD_JSON_COLUMNS}, "scope_summary": row["scope_summary"] or ""}
+
+
 def _list_leads(db):
     rows = db.all(
-        """SELECT l.normalized_url, l.name, l.platform, l.url, l.found_via,
+        f"""SELECT l.normalized_url, l.name, l.platform, l.url, l.found_via,
                   coalesce((SELECT x.scope_summary FROM program_leads x
                             WHERE x.normalized_url = l.normalized_url AND x.scope_summary <> ''
                             ORDER BY x.id DESC LIMIT 1), '') AS scope_summary,
+                  {", ".join(_latest(c) for c in LEAD_DETAIL_COLUMNS)},
                   (SELECT count(*) FROM program_leads x WHERE x.normalized_url = l.normalized_url) AS sightings,
                   l.created_at
            FROM program_leads l

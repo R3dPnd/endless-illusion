@@ -4,9 +4,11 @@ import { displayHost } from "./displayHost";
 import { useAgents } from "./hooks/useAgents";
 import { useBounties } from "./hooks/useBounties";
 import { useRun } from "./hooks/useRun";
+import ErrorBoundary from "./components/ErrorBoundary";
 import ArchivePage from "./pages/ArchivePage";
 import BountiesPage from "./pages/BountiesPage";
 import ConsolePage from "./pages/ConsolePage";
+import { scoutTask, type DannSession } from "./bounties";
 import { speakerFor } from "./speakers";
 import type { Program } from "./types";
 
@@ -43,6 +45,33 @@ export default function App() {
     setRoute("console");
   }
 
+  // Bounty board: open a session with Dann about a bounty. It joins the Console
+  // conversation; active tooling is never armed from here.
+  function startDann(s: DannSession) {
+    agents.setSelected("dann-of-thursday");
+    if (s.programId !== undefined) setProgramId(s.programId);
+    void run.start("dann-of-thursday", {
+      task: s.task,
+      scope: s.scope,
+      authorization: s.authorization,
+      enableActive: false,
+      ...(s.programId !== undefined ? { programId: s.programId } : {}),
+    });
+    setRoute("console");
+  }
+
+  // Bounty board: Saudade scouts public directories with the bounty-scout skill.
+  // Stay on the board; it polls while the run is active, so cards appear as they're recorded.
+  function scout(focus: string) {
+    agents.setSelected("saudade-of-sunday");
+    void run.start("saudade-of-sunday", {
+      task: scoutTask(focus),
+      scope: "Public bug bounty directories and program/policy pages only (passive). No program assets.",
+      authorization: "",
+      enableActive: false,
+    });
+  }
+
   function pickProgram(id: number) {
     setProgramId(id);
     setRoute("console");
@@ -61,11 +90,15 @@ export default function App() {
 
       {agents.error && <Banner>Could not load agents: {agents.error}. Is the server running on :8787?</Banner>}
 
-      {route === "console" && (
-        <ConsolePage agents={agents} run={run} programs={bounties.data?.confirmed ?? []} programId={programId} onProgramChange={setProgramId} />
-      )}
-      {route === "archive" && <ArchivePage agents={agents.agents} />}
-      {route === "bounties" && <BountiesPage bounties={bounties} onAskSen={askSen} onUseProgram={pickProgram} />}
+      <ErrorBoundary key={route} area={TABS.find((t) => t.id === route)?.label ?? "This tab"}>
+        {route === "console" && (
+          <ConsolePage agents={agents} run={run} programs={bounties.data?.confirmed ?? []} programId={programId} onProgramChange={setProgramId} />
+        )}
+        {route === "archive" && <ArchivePage agents={agents.agents} />}
+        {route === "bounties" && (
+          <BountiesPage bounties={bounties} busy={run.busy} onAskSen={askSen} onUseProgram={pickProgram} onStartDann={startDann} onScout={scout} />
+        )}
+      </ErrorBoundary>
     </div>
   );
 }

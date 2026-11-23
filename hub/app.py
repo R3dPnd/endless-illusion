@@ -163,7 +163,8 @@ class Hub:
 
     def start_run(self, body):
         link = {}
-        if body.get("programId") is not None:
+        # A follow-up inherits its program link from the run it continues (see Runner.resumable).
+        if body.get("programId") is not None and body.get("continueRun") is None:
             link = {"programId": int(body["programId"]), "snapshotId": require_confirmed_snapshot(self.db, body["programId"])}
         try:
             return self.runner.start(body, link).public()

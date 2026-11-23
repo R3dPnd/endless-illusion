@@ -50,9 +50,23 @@ WRITE_TABLES = {
     },
     "program_leads": {
         "tool": "record_program_lead",
-        "description": "Record a bug bounty or disclosure program you came across. "
-        "A lead is informational only and never authorizes testing.",
-        "columns": {"name": TEXT, "platform": TEXT_OPT, "url": TEXT, "found_via": TEXT, "scope_summary": TEXT_OPT},
+        "description": "Record a bug bounty or disclosure program you came across, with the details shown on the "
+        "operator's bounty board (rewards, asset types, a short summary, sources). Recording the same URL again adds a "
+        "sighting and refreshes any details you supply. A lead is informational only and never authorizes testing.",
+        "columns": {
+            "name": TEXT,
+            "platform": TEXT_OPT,
+            "url": TEXT,
+            "found_via": TEXT,
+            "scope_summary": TEXT_OPT,
+            "program_type": {"type": "enum", "values": ["bounty", "vdp"], "optional": True},
+            "rewards": TEXT_OPT,  # as published, e.g. "$150 – $25,000"
+            "max_reward_usd": INT_OPT,  # top published payout in USD, for sorting
+            "asset_types": {"type": "json", "optional": True},  # e.g. ["web", "api", "mobile"]
+            "details": TEXT_OPT,  # what the program covers, notable rules, why it is interesting
+            "program_updated": TEXT_OPT,  # ISO date the program page says it last changed
+            "sources": {"type": "json", "optional": True},  # URLs the details came from
+        },
     },
     "web_findings": {
         "tool": "save_web_finding",
@@ -100,7 +114,9 @@ WRITE_TABLES = {
     "scope_proposals": {
         "tool": "propose_scope",
         "description": "Propose structured scope for a tracked program. "
-        "It does not count as authorization until the operator confirms it.",
+        "It does not count as authorization until the operator confirms it. "
+        'Shape: in_scope and out_of_scope are lists of {"asset": "<host, URL, or pattern>", "type": "<domain|url|api|mobile|...>", '
+        '"notes": "<tier, payout, conditions>"}; exclusions is a list of plain strings, one rule each.',
         "columns": {
             "program_id": {"type": "int"},
             "in_scope": {"type": "json"},

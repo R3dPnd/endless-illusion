@@ -18,8 +18,8 @@ def table_names(db):
 
 
 def test_migrations_set_user_version_and_are_idempotent(db):
-    assert db.get("PRAGMA user_version")["user_version"] == 1
-    assert migrate(db) == 1
+    assert db.get("PRAGMA user_version")["user_version"] == 3
+    assert migrate(db) == 3
 
 
 def test_creates_every_owned_table_plus_hub_and_operator_tables(db):

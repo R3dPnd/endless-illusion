@@ -127,7 +127,20 @@ export interface ScopeItem {
   notes?: string;
 }
 
-export interface Lead {
+/** Bounty-board fields agents supply via record_program_lead (bounty-scout skill). */
+export interface BoardDetails {
+  programType: "bounty" | "vdp" | null;
+  rewards: string | null;
+  maxRewardUsd: number | null;
+  assetTypes: string[];
+  details: string | null;
+  programUpdated: string | null;
+  sources: string[];
+  /** Unverified, agent-written; only a confirmed snapshot is authoritative. */
+  scopeSummary: string;
+}
+
+export interface Lead extends BoardDetails {
   normalizedUrl: string;
   name: string;
   platform: string | null;
@@ -152,7 +165,7 @@ export interface Proposal {
   sourceExcerpt: string;
 }
 
-export interface Program {
+export interface Program extends BoardDetails {
   id: number;
   name: string;
   platform: string | null;

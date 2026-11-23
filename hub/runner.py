@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -9,10 +10,10 @@ import time
 import uuid
 from pathlib import Path
 
-from .db.archive import add_report, append_event, create_run, finish_run
+from .db.archive import add_report, append_event, create_run, find_session_id, finish_run, get_run
 from .db.ownership import AGENTS, OWNERSHIP
 from .policies import get_policy, load_policies
-from .prompt import build_prompt
+from .prompt import build_followup_prompt, build_prompt
 from .report import DELEGATE_TOOLS, HANDBACK_TOOLS, clean_report, result_text
 from .session import build_session_args, load_shared_server, write_mcp_config
 from .tool_names import SHARED_READ_TOOLS, qualified_tools_for
@@ -49,6 +50,33 @@ def resolve_command(cmd):
     return [exe, *map(str, cmd[1:])]
 
 
+FRONTMATTER = re.compile(r"\A---\r?\n([\s\S]*?)^---\r?$", re.M)
+
+
+def preloaded_skills(repo_root, agent):
+    """
+    Bodies of the skills listed under `skills:` in .claude/agents/<agent>.md,
+    each read from .claude/skills/<name>/SKILL.md (frontmatter stripped).
+    A missing definition or skill is skipped with a warning, never fatal.
+    """
+    try:
+        md = (repo_root / ".claude" / "agents" / f"{agent}.md").read_text(encoding="utf8")
+    except OSError:
+        return []
+    fm = FRONTMATTER.match(md)
+    block = re.search(r"^skills:[ \t]*\r?\n((?:[ \t]+-[ \t]*.+\r?\n?)+)", fm.group(1), re.M) if fm else None
+    names = re.findall(r"-[ \t]*([\w.-]+)", block.group(1)) if block else []
+    bodies = []
+    for name in names:
+        try:
+            skill = (repo_root / ".claude" / "skills" / name / "SKILL.md").read_text(encoding="utf8")
+        except OSError as err:
+            print(f"[skills] {agent}: {err}", file=sys.stderr)
+            continue
+        bodies.append(f"# Skill: {name}\n\n{FRONTMATTER.sub('', skill, count=1).strip()}")
+    return bodies
+
+
 class Run:
     def __init__(self, **fields):
         self.__dict__.update(fields)
@@ -58,6 +86,7 @@ class Run:
         self.lock = threading.Lock()
         self.proc = None
         self.result = None
+        self.session_id = None
 
     def subscribe(self):
         """Buffered events so far plus a queue for the rest; None on the queue means done."""
@@ -88,7 +117,14 @@ class Run:
             self.listeners.clear()
 
     def public(self):
-        return {"id": self.id, "agent": self.agent, "status": self.status, "tools": self.tools, "activeEngaged": self.activeEngaged}
+        return {
+            "id": self.id,
+            "agent": self.agent,
+            "status": self.status,
+            "tools": self.tools,
+            "activeEngaged": self.activeEngaged,
+            "parentRunId": self.parentRunId,
+        }
 
 
 class Runner:
@@ -110,13 +146,37 @@ class Runner:
     def get(self, run_id):
         return self.live.get(run_id)
 
+    def resumable(self, run_id):
+        """
+        What a follow-up inherits from the run it continues: agent, scope,
+        authorization, the exact toolset, program link, and the claude session
+        to resume. Read from the archive so it survives a hub restart; nothing
+        here is taken from the follow-up request.
+        """
+        stored = get_run(self.db, run_id) if isinstance(run_id, str) else None
+        if not stored:
+            raise ValueError("no such run to continue")
+        live = self.live.get(run_id)
+        if (live and live.status == "running") or stored["status"] == "running":
+            raise ValueError("that run is still going; wait for it to finish or stop it first")
+        session_id = (live.session_id if live else None) or find_session_id(self.db, run_id)
+        if not session_id:
+            raise ValueError("that run has no claude session to continue")
+        return {**stored, "session_id": session_id}
+
     def start(self, body, link=None):
         """link: {programId, snapshotId} resolved by the server from a confirmed snapshot — never taken from the request."""
         link = link or {}
-        agent = body.get("agent")
+        parent = self.resumable(body["continueRun"]) if body.get("continueRun") is not None else None
         task = body.get("task")
-        scope = body.get("scope") or ""
-        authorization = body.get("authorization") or ""
+        if parent:
+            # A follow-up keeps its conversation's agent, scope, and authorization.
+            agent, scope, authorization = parent["agent"], parent["scope"], parent["authorization"]
+            link = {"programId": parent["program_id"], "snapshotId": parent["snapshot_id"]}
+        else:
+            agent = body.get("agent")
+            scope = body.get("scope") or ""
+            authorization = body.get("authorization") or ""
         if not agent or not isinstance(task, str) or not task.strip():
             raise ValueError("agent and task are required")
         if not isinstance(scope, str) or not isinstance(authorization, str):
@@ -126,7 +186,11 @@ class Runner:
             raise ValueError(f"unknown agent: {agent}")
 
         orchestrated = agent == ORCHESTRATOR
-        tools, active_engaged = resolve_tools(self.agents_dir, orchestrated, bool(body.get("enableActive")), authorization, policy)
+        if parent:
+            # Same toolset as the run being continued: a reply can neither arm nor widen active tooling.
+            tools, active_engaged = parent["tools"], parent["active_engaged"]
+        else:
+            tools, active_engaged = resolve_tools(self.agents_dir, orchestrated, bool(body.get("enableActive")), authorization, policy)
 
         # Every run carries the RoE. Direct runs also carry the agent's dossier,
         # as the subagent would; Dann gets his definition from --agent, which
@@ -134,7 +198,13 @@ class Runner:
         system_prompt = None
         try:
             roe = (self.repo_root / "RULES-OF-ENGAGEMENT.md").read_text(encoding="utf8")
-            system_prompt = roe if orchestrated else f"{(self.agents_dir / f'{agent}.md').read_text(encoding='utf8')}\n\n---\n\n{roe}"
+            if orchestrated:
+                system_prompt = roe
+            else:
+                # Direct runs aren't spawned as subagents, so the definition's `skills:`
+                # preload doesn't happen; append those skills here instead.
+                parts = [(self.agents_dir / f"{agent}.md").read_text(encoding="utf8"), roe, *preloaded_skills(self.repo_root, agent)]
+                system_prompt = "\n\n---\n\n".join(parts)
         except OSError as err:
             print(f"[dossier] {agent}: {err}", file=sys.stderr)
 
@@ -150,6 +220,7 @@ class Runner:
             mcp_tools=[t for a in memory_agents for t in qualified_tools_for(a)] + (SHARED_READ_TOOLS if shared else []),
             agent_def=ORCHESTRATOR if orchestrated else None,
             system_prompt=system_prompt,
+            resume=parent["session_id"] if parent else None,
         )
 
         run = Run(
@@ -160,6 +231,7 @@ class Runner:
             tools=tools,
             programId=link.get("programId"),
             snapshotId=link.get("snapshotId"),
+            parentRunId=parent["id"] if parent else None,
             finished=False,
         )
         self.live[run_id] = run
@@ -192,10 +264,21 @@ class Runner:
                     "tools": tools,
                     "programId": run.programId,
                     "snapshotId": run.snapshotId,
+                    "parentRunId": run.parentRunId,
                 },
             ),
         )
-        push({"kind": "meta", "agent": agent, "orchestrated": orchestrated, "activeEngaged": active_engaged, "tools": tools, "ts": now_ms()})
+        push(
+            {
+                "kind": "meta",
+                "agent": agent,
+                "orchestrated": orchestrated,
+                "activeEngaged": active_engaged,
+                "tools": tools,
+                "parentRunId": run.parentRunId,
+                "ts": now_ms(),
+            }
+        )
 
         delegations = {}  # tool_use id -> subagent id
         handbacks = {}  # delegation id -> report delivered via SubagentHandback
@@ -245,7 +328,7 @@ class Runner:
             )
             run.close()
 
-        prompt = build_prompt(agent, task, scope, authorization, orchestrated)
+        prompt = build_followup_prompt(task) if parent else build_prompt(agent, task, scope, authorization, orchestrated)
         try:
             proc = subprocess.Popen(
                 resolve_command(self.claude_cmd) + args,
@@ -290,6 +373,8 @@ class Runner:
                     continue
                 if obj.get("type") == "result":
                     run.result = obj
+                if isinstance(obj.get("session_id"), str) and obj["session_id"]:
+                    run.session_id = obj["session_id"]
                 push({"kind": "claude", "data": obj, "ts": now_ms()})
                 collect_reports(obj)
             err_thread.join()

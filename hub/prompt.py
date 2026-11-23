@@ -1,3 +1,14 @@
+def build_followup_prompt(message):
+    """A chat reply into a resumed session. Scope, authorization, and tools carry over from the run it continues."""
+    return "\n".join(
+        [
+            "OPERATOR FOLLOW-UP (scope and authorization are unchanged from earlier in this conversation):",
+            "",
+            message.strip(),
+        ]
+    )
+
+
 def build_prompt(agent, task, scope, authorization, orchestrated):
     """The run prompt sent to claude over stdin (user input never reaches argv)."""
     auth_line = authorization.strip() if authorization and authorization.strip() else "NONE PROVIDED — treat this as unauthorized; passive work only."

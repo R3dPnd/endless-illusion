@@ -1,17 +1,19 @@
 import { useState } from "react";
 import type { Program } from "../../types";
 import { Button } from "pnd-lib-react";
+import BoardFacts from "./BoardFacts";
 import ExternalLink from "./ExternalLink";
 import ProposalReview from "./ProposalReview";
 
 interface Props {
   program: Program;
+  onOpen: () => void;
   onAskSen: () => void;
   onConfirm: (proposalId: number) => void;
   onReject: (proposalId: number) => void;
 }
 
-export default function ProgramCard({ program, onAskSen, onConfirm, onReject }: Props) {
+export default function ProgramCard({ program, onOpen, onAskSen, onConfirm, onReject }: Props) {
   const [reviewing, setReviewing] = useState(false);
   const proposal = program.proposals[0];
   return (
@@ -22,7 +24,12 @@ export default function ProgramCard({ program, onAskSen, onConfirm, onReject }: 
         <span className="chip tone--muted">{program.source}</span>
       </div>
       <ExternalLink href={program.url} />
+      <BoardFacts b={program} />
+      {program.details && <p className="bounty-card__details">{program.details}</p>}
       <div className="card__actions">
+        <Button variant="primary" onClick={onOpen}>
+          Brief Dann
+        </Button>
         <Button variant="ghost" onClick={onAskSen}>
           Ask Sen for scope
         </Button>

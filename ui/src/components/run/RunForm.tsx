@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { authorizationText, scopeText } from "../../bounties";
 import type { AgentPolicy, ConfirmedProgram } from "../../types";
 import type { RunRequest } from "../../hooks/useRun";
+import { composeRun, isComplete, specFor } from "../../triggerSpecs";
 import { canGoActive, prettyName } from "../../util";
 import { Button, EmptyState, TextField } from "pnd-lib-react";
 import ActiveGate from "./ActiveGate";
@@ -17,30 +18,41 @@ interface Props {
   onProgramChange: (id: number | null) => void;
 }
 
+/** The Trigger form, shaped to the selected agent (see triggerSpecs.ts). */
 export default function RunForm({ agent, busy, onRun, programs, programId, onProgramChange }: Props) {
   const [task, setTask] = useState("");
-  const [scope, setScope] = useState("");
-  const [authorization, setAuthorization] = useState("");
+  // Field values by key. Scope and authorization are shared keys, so they carry
+  // across agents that use them; hidden fields are never sent.
+  const [values, setValues] = useState<Record<string, string>>({});
   const [enableActive, setEnableActive] = useState(false);
   const [confirm, setConfirm] = useState(false);
+  const set = (key: string) => (v: string) => setValues((prev) => ({ ...prev, [key]: v }));
+
+  const spec = specFor(agent);
 
   // Choosing a program fills Scope and Authorization from its confirmed snapshot.
-  const program = programs.find((p) => p.id === programId);
+  const program = spec.program ? programs.find((p) => p.id === programId) : undefined;
   useEffect(() => {
     if (!program) return;
-    setScope(scopeText(program));
-    setAuthorization(authorizationText(program));
+    setValues((prev) => ({ ...prev, scope: scopeText(program), authorization: authorizationText(program) }));
   }, [program]);
 
-  const activeCapable = canGoActive(agent);
-  const hasAuth = authorization.trim().length > 0;
-  // Active tooling only unlocks with: capable agent + authorization + confirm.
-  const activeArmed = activeCapable && enableActive && confirm && hasAuth;
-  const canSubmit = !!agent && task.trim().length > 0 && !busy;
+  // Never carry an armed gate over to a different agent.
+  useEffect(() => {
+    setEnableActive(false);
+    setConfirm(false);
+  }, [agent?.agent]);
 
   if (!agent) {
     return <EmptyState>Select an agent to begin.</EmptyState>;
   }
+
+  const composed = composeRun(spec, task, values);
+  const activeCapable = canGoActive(agent);
+  const hasAuth = composed.authorization.length > 0;
+  // Active tooling only unlocks with: capable agent + authorization + confirm.
+  const activeArmed = activeCapable && enableActive && confirm && hasAuth;
+  const canSubmit = isComplete(spec, task, values) && !busy;
 
   return (
     <form
@@ -48,36 +60,35 @@ export default function RunForm({ agent, busy, onRun, programs, programId, onPro
       onSubmit={(e) => {
         e.preventDefault();
         if (!canSubmit) return;
-        onRun({ task, scope, authorization, enableActive: activeArmed, ...(program ? { programId: program.id } : {}) });
+        onRun({ ...composed, enableActive: activeArmed, ...(program ? { programId: program.id } : {}) });
       }}
     >
       <div className="run-form__agent">
         Dispatching to <strong>{prettyName(agent.agent)}</strong>
-        {agent.role === "orchestrator" && <span className="hint"> — will route to the specialists</span>}
+        <span className="hint"> — {agent.role}</span>
       </div>
 
-      {programs.length > 0 && <ProgramPicker programs={programs} value={programId} onChange={onProgramChange} />}
+      {spec.program && programs.length > 0 && <ProgramPicker programs={programs} value={programId} onChange={onProgramChange} />}
 
       <TextField
-        label="Task"
+        label={spec.taskLabel}
         value={task}
         onChange={setTask}
-        placeholder="e.g. Summarize known CVEs for nginx 1.24.0"
-        rows={3}
+        placeholder={spec.taskPlaceholder}
+        rows={spec.taskRows ?? 3}
         required
       />
-      <TextField
-        label="Scope / target(s)"
-        value={scope}
-        onChange={setScope}
-        placeholder="In-scope assets, domains, IP ranges, exclusions…"
-      />
-      <TextField
-        label="Authorization"
-        value={authorization}
-        onChange={setAuthorization}
-        placeholder="Bounty program + link, signed SOW reference, or owner's written permission. Leave blank for passive-only."
-      />
+      {spec.fields.map((f) => (
+        <TextField
+          key={f.key}
+          label={f.required ? f.label : `${f.label} (optional)`}
+          value={values[f.key] ?? ""}
+          onChange={set(f.key)}
+          placeholder={f.placeholder}
+          rows={f.rows}
+          required={f.required}
+        />
+      ))}
 
       {activeCapable ? (
         <ActiveGate
@@ -89,11 +100,11 @@ export default function RunForm({ agent, busy, onRun, programs, programId, onPro
           armed={activeArmed}
         />
       ) : (
-        <GateStatus armed={false} label="Passive agent — no active tooling" />
+        <GateStatus armed={false} label={agent.role === "orchestrator" ? "Routes to specialists — no active tooling of its own" : "Passive agent — no active tooling"} />
       )}
 
       <Button type="submit" variant="primary" disabled={!canSubmit}>
-        {busy ? "Running…" : "Trigger agent"}
+        {busy ? "Running…" : spec.submitLabel}
       </Button>
     </form>
   );

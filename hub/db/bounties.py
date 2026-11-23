@@ -8,8 +8,9 @@ import time
 from datetime import datetime
 
 from . import now_iso
-from .read import list_programs, parse_json
+from .read import LEAD_JSON_COLUMNS, lead_profile, list_programs, parse_json
 from .redact import clip, redact
+from .scope import exclusion_lines, scope_items
 from .url import normalize_url
 
 
@@ -117,9 +118,25 @@ def _unique(values):
     return list(dict.fromkeys(values))
 
 
+def _board_details(row):
+    """Agent-supplied bounty-board fields, camelCased for the UI."""
+    row = row or {}
+    return {
+        "programType": row.get("program_type"),
+        "rewards": row.get("rewards"),
+        "maxRewardUsd": row.get("max_reward_usd"),
+        "assetTypes": row.get("asset_types") or [],
+        "details": row.get("details"),
+        "programUpdated": row.get("program_updated"),
+        "sources": row.get("sources") or [],
+    }
+
+
 def _lead_details(db, lead):
     rows = db.all("SELECT agent, run_id, created_at FROM program_leads WHERE normalized_url = ? ORDER BY id", lead["normalized_url"])
+    lead = {**lead, **{c: parse_json(lead.get(c), []) for c in LEAD_JSON_COLUMNS}}
     return {
+        **_board_details(lead),
         "normalizedUrl": lead["normalized_url"],
         "name": lead["name"],
         "platform": lead["platform"],
@@ -147,17 +164,20 @@ def _open_proposals(db, program_id):
             "agent": p["agent"],
             "runId": p["run_id"],
             "createdAt": p["created_at"],
-            "inScope": parse_json(p["in_scope"], []),
-            "outOfScope": parse_json(p["out_of_scope"], []),
-            "exclusions": parse_json(p["exclusions"], []),
+            "inScope": scope_items(parse_json(p["in_scope"], [])),
+            "outOfScope": scope_items(parse_json(p["out_of_scope"], [])),
+            "exclusions": exclusion_lines(parse_json(p["exclusions"], [])),
             "sourceExcerpt": p["source_excerpt"],
         }
         for p in rows
     ]
 
 
-def _program_shape(p):
+def _program_shape(db, p):
+    profile = lead_profile(db, p["normalized_url"])
     return {
+        **_board_details(profile),
+        "scopeSummary": profile["scope_summary"] if profile else "",
         "id": p["id"],
         "name": p["name"],
         "platform": p["platform"],
@@ -183,10 +203,10 @@ def list_bounties(db, now=None):
 
     return {
         "leads": [_lead_details(db, lead) for lead in stages["leads"]],
-        "tracked": [{**_program_shape(p), "policyText": policy(p["id"]), "proposals": _open_proposals(db, p["id"])} for p in stages["tracked"]],
+        "tracked": [{**_program_shape(db, p), "policyText": policy(p["id"]), "proposals": _open_proposals(db, p["id"])} for p in stages["tracked"]],
         "confirmed": [
             {
-                **_program_shape(p),
+                **_program_shape(db, p),
                 "proposals": _open_proposals(db, p["id"]),
                 "snapshot": {
                     "id": p["scope"]["id"],

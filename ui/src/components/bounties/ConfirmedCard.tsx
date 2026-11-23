@@ -1,9 +1,10 @@
 import type { ConfirmedProgram } from "../../types";
 import { Button } from "pnd-lib-react";
+import BoardFacts from "./BoardFacts";
 import ExternalLink from "./ExternalLink";
 import ScopeList from "./ScopeList";
 
-export default function ConfirmedCard({ program, onUse }: { program: ConfirmedProgram; onUse: () => void }) {
+export default function ConfirmedCard({ program, onOpen, onUse }: { program: ConfirmedProgram; onOpen: () => void; onUse: () => void }) {
   const { snapshot } = program;
   return (
     <li className={`card bounty-card ${snapshot.stale ? "is-stale" : ""}`}>
@@ -13,12 +14,16 @@ export default function ConfirmedCard({ program, onUse }: { program: ConfirmedPr
         {snapshot.stale && <span className="chip tone--orange">re-verify scope</span>}
       </div>
       <ExternalLink href={program.url} />
+      <BoardFacts b={program} />
       <div className="cell-sub">
         snapshot #{snapshot.id} · confirmed {snapshot.confirmedAt.slice(0, 10)}
       </div>
       <ScopeList title="In scope" items={snapshot.inScope} />
       {snapshot.exclusions.length > 0 && <ScopeList title="Exclusions" items={snapshot.exclusions} />}
       <div className="card__actions">
+        <Button variant="primary" onClick={onOpen}>
+          Brief Dann
+        </Button>
         <Button variant="ghost" onClick={onUse}>
           Use in Trigger
         </Button>

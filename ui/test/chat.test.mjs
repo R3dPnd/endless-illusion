@@ -27,3 +27,24 @@ describe("buildChat", () => {
     expect(report.text).toContain("CVE-2021-44228 is a JNDI lookup RCE");
   });
 });
+
+describe("buildThread", () => {
+  it("keeps earlier runs when another agent is triggered or a reply is sent", async () => {
+    const { buildThread } = await import("../src/chat.ts");
+    const first = { id: "s1", runId: "r1", task: "Check prior work", events: events("run-events.jsonl") };
+    const second = { id: "s2", runId: "r2", task: "Go deeper", events: events("run-events.jsonl") };
+    const { messages } = buildThread([first, second]);
+    const prompts = messages.filter((m) => m.kind === "prompt").map((m) => m.text);
+    expect(prompts).toEqual(["Check prior work", "Go deeper"]);
+    expect(new Set(messages.map((m) => m.key)).size).toBe(messages.length);
+  });
+
+  it("shows a pending reply and a refused one in the channel", async () => {
+    const { buildThread } = await import("../src/chat.ts");
+    const pending = { id: "s1", runId: null, task: "and then?", events: [] };
+    expect(buildThread([pending]).messages.map((m) => m.text)).toEqual(["and then?"]);
+    const refused = { ...pending, events: [{ kind: "error", text: "that run is still going", ts: 1 }] };
+    const msgs = buildThread([refused]).messages;
+    expect(msgs[1]).toMatchObject({ from: "hub", isError: true, text: "that run is still going" });
+  });
+});

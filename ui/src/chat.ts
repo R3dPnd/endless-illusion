@@ -140,3 +140,34 @@ export function buildChat(events: RunEvent[], task: string | undefined): Chat {
 
   return { messages, active, finalText };
 }
+
+/** One run's slice of a conversation: a fresh trigger or a reply that resumed the previous run. */
+export interface ThreadSegment {
+  id: string; // client-side key; stable before the server assigns a run id
+  runId: string | null;
+  task: string;
+  events: RunEvent[];
+}
+
+/**
+ * The whole conversation across runs, in order. Each segment is folded on its
+ * own (delegation ids are per-run) and its message keys are prefixed so they
+ * stay unique. Typing indicator and final text come from the latest segment.
+ */
+export function buildThread(segments: ThreadSegment[]): Chat {
+  const messages: ChatMessage[] = [];
+  let last: Chat = { messages: [] };
+  for (const seg of segments) {
+    last = buildChat(seg.events, seg.task);
+    // Show the operator's message right away, before the run's meta event arrives (or if it never does).
+    if (!seg.events.some((e) => e.kind === "meta") && seg.task.trim()) {
+      messages.push({ key: `${seg.id}:p`, kind: "prompt", from: "operator", text: seg.task, ts: seg.events[0]?.ts ?? Date.now() });
+    }
+    for (const m of last.messages) messages.push({ ...m, key: `${seg.id}:${m.key}` });
+    // A run that failed to start (e.g. the hub refused a reply) says why in the channel.
+    seg.events.forEach((e, i) => {
+      if (e.kind === "error") messages.push({ key: `${seg.id}:e${i}`, kind: "message", from: "hub", text: e.text, ts: e.ts, isError: true });
+    });
+  }
+  return { messages, active: last.active, finalText: last.finalText };
+}

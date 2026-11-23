@@ -22,8 +22,8 @@ def to_json(value):
 
 def create_run(db, run):
     db.run(
-        """INSERT INTO runs (id, agent, task, scope, authorization, active_engaged, tools, status, program_id, snapshot_id, started_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?)""",
+        """INSERT INTO runs (id, agent, task, scope, authorization, active_engaged, tools, status, program_id, snapshot_id, parent_run_id, started_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'running', ?, ?, ?, ?)""",
         run["id"],
         run["agent"],
         _clean(run.get("task")),
@@ -33,6 +33,7 @@ def create_run(db, run):
         to_json(run.get("tools") or []),
         run.get("programId"),
         run.get("snapshotId"),
+        run.get("parentRunId"),
         now_iso(),
     )
 
@@ -101,6 +102,15 @@ def list_runs(db, agent=None, status=None, programId=None, q=None, limit=50, **_
         params += [like, like]
     sql = f"SELECT * FROM runs {'WHERE ' + ' AND '.join(where) if where else ''} ORDER BY started_at DESC, rowid DESC LIMIT ?"
     return [_to_run(r) for r in db.all(sql, *params, min(_int_or(limit, 50), 200))]
+
+
+def find_session_id(db, run_id):
+    """The claude session id a stored run reported (stream-json events carry it), or None."""
+    for evt in get_run_events(db, run_id):
+        data = evt.get("data") if evt.get("kind") == "claude" else None
+        if isinstance(data, dict) and isinstance(data.get("session_id"), str) and data["session_id"]:
+            return data["session_id"]
+    return None
 
 
 def get_run_events(db, run_id):
