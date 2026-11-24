@@ -130,6 +130,39 @@ against a stdio MCP spike server exposing one tool, `permission`:
   `--tools` is variadic, so put the prompt after `--` (or before the flag); and the fork sees the
   pending tool call as interrupted. No need to restrict Ask to paused stages.
 
+**Follow-up: guaranteeing every gated call reaches the hub (verified)**
+
+- **The permission tool alone is NOT enough.** Claude Code's config auto-allow (read-only
+  Bash such as `echo hi`; decision `source:"config", reason_type:"subcommandResults"`) is
+  decided before the permission tool is consulted. `--permission-mode manual` and `default`
+  do not change this: `echo hi` still bypassed the tool in both.
+- **A `PreToolUse` hook fires for auto-allowed calls** (via `--settings <json>`, matcher
+  `"Bash|WebFetch|Write|Edit"`, `"timeout": 3600`). Hook stdin JSON:
+  ```json
+  {"session_id":"…","transcript_path":"…","cwd":"…","prompt_id":"…","permission_mode":"default",
+   "effort":{"level":"medium"},"hook_event_name":"PreToolUse","tool_name":"Bash",
+   "tool_input":{"command":"echo hi","description":"Run echo hi"},"tool_use_id":"toolu_…"}
+  ```
+- **Hook reply `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}`
+  overrides the auto-allow:** `echo hi` then reached `--permission-prompt-tool` with the normal
+  request (`tool_name`, `input`, `tool_use_id`), and the tool's deny message reached the agent.
+- **The hook can block as long as needed:** with `"timeout": 3600`, a hook that slept 25s then
+  returned `permissionDecision:"allow"` held the run for ~27s, then `echo hi` ran
+  (`permission_decision` `{"decision":"accept","source":"hook"}`).
+- **Hook deny:** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+  "permissionDecisionReason":"…"}}` blocks the call; the agent receives
+  `PreToolUse:Bash hook error: <reason>` (`is_error:true`) and stops.
+- **Env:** the hook process inherits the claude process's environment (`EI_RUN_ID=test` set on
+  spawn was visible to the hook).
+- **Recommendation:** use the hook as the single gate. It sees every Bash/WebFetch/Write/Edit
+  call (including auto-allowed ones) with the full input and run env, can block while the
+  operator decides, and returns allow/deny with a reason that reaches the agent. Having the hook
+  return `"ask"` and keep `--permission-prompt-tool` too is workable but redundant; if both are
+  used, the hook must return `ask` for every call, otherwise auto-allowed ones skip the tool.
+  Do not rely on `--permission-prompt-tool` alone.
+- Test caveat: `--mcp-config` pointing at a missing server script makes the permission tool
+  error with "not found. Available MCP tools: none"; check `mcp_servers[].status` in the init event.
+
 ## 5. Design (decided with the operator)
 
 ### 5.1 Engagement and stages
