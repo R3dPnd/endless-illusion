@@ -2,6 +2,8 @@
 
 import json
 import os
+import shlex
+import signal
 import subprocess
 import sys
 import threading
@@ -136,6 +138,26 @@ def test_permission_without_declaration_denies(client):
     assert reply == {"behavior": "deny", "message": DECLARE_FIRST}
 
 
+def test_permission_malformed_args_deny(client):
+    malformed = [
+        {},
+        {"input": {"command": "echo hi > x"}},
+        {"tool_name": 5, "input": {}},
+        {"tool_name": None, "input": {}},
+        {"tool_name": "Bash"},
+        {"tool_name": "Bash", "input": "echo hi > x"},
+        {"tool_name": "Bash", "input": ["echo"]},
+        {"tool_name": "Bash", "input": None, "tool_use_id": "t"},
+    ]
+    for args in malformed:
+        res = client.call("permission", args)
+        assert not res["result"].get("isError"), args
+        assert json.loads(text(res)) == {"behavior": "deny", "message": "malformed permission request"}, args
+    # extra fields from a newer Claude Code are tolerated, not refused
+    res = client.call("permission", {"tool_name": "Bash", "input": {"command": "echo hi > x"}, "tool_use_id": "t", "new": 1})
+    assert json.loads(text(res))["behavior"] == "deny" and not res["result"].get("isError")
+
+
 def test_permission_without_context_denies(env):
     _, db_file, root = env
     for run_id in ("no-such-run", None):
@@ -232,17 +254,25 @@ def test_hook_denies_unreachable_db(tmp_path):
     assert verdict == "deny" and reason
 
 
+NASTY = ["/py thon", "/a $HOME/gate.py", '/d "b"/`id`.db', "/r'oot; rm -rf x"]
+
+
 def test_hook_settings_shape():
     from hub.gate import hook_settings
 
-    s = hook_settings("/py thon", "/a b/gate.py", "/d b/ei.db", "/r'oot")
+    s = hook_settings(*NASTY)
     assert list(s) == ["hooks"]
     (entry,) = s["hooks"]["PreToolUse"]
     assert entry["matcher"] == "Bash|WebFetch|Write|Edit|MultiEdit|NotebookEdit"
     (hook,) = entry["hooks"]
     assert hook["type"] == "command" and hook["timeout"] == 86400
-    assert hook["command"].startswith("/bin/sh -c ")
     json.dumps(s)
+    outer = shlex.split(hook["command"])
+    assert outer[:2] == ["/bin/sh", "-c"] and len(outer) == 3
+    inner = shlex.split(outer[2])
+    py, gate, db_file, root = NASTY
+    assert inner[:7] == [py, gate, "--hook", "--db", db_file, "--repo-root", root]
+    assert inner[7] == "||"
 
 
 def test_hook_wrapper_allows_after_approval(env):
@@ -265,7 +295,7 @@ def test_hook_wrapper_blocks_on_bad_interpreter(env):
     cmd = hook_settings("/no/such/python", str(GATE), str(db_file), str(root))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     res = run_hook(db_file, root, hook_input("echo hi"), cmd=cmd)
     assert res.returncode == 2
-    assert res.stderr.strip()
+    assert "(exit 127)" in res.stderr
 
 
 def test_hook_wrapper_denies_garbage_stdin(env):
@@ -274,3 +304,28 @@ def test_hook_wrapper_denies_garbage_stdin(env):
     _, db_file, root = env
     cmd = hook_settings(sys.executable, str(GATE), str(db_file), str(root))["hooks"]["PreToolUse"][0]["hooks"][0]["command"]
     assert decision(run_hook(db_file, root, "garbage{", cmd=cmd))[0] == "deny"
+
+
+def test_hook_sigterm_during_wait_expires_pending(env):
+    db, db_file, root = env
+    declare_in_db(db)
+    environ = {**os.environ, "EI_RUN_ID": RUN}
+    proc = subprocess.Popen(
+        [sys.executable, str(GATE), "--hook", "--db", str(db_file), "--repo-root", str(root)],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=environ,
+    )
+    proc.stdin.write(hook_input(IN_CMD))
+    proc.stdin.close()
+    deadline = time.monotonic() + 15
+    while not [a for a in pending_actions(db) if a["run_id"] == RUN]:
+        assert time.monotonic() < deadline, "no pending action"
+        time.sleep(0.02)
+    proc.send_signal(signal.SIGTERM)
+    proc.wait(timeout=10)
+    out, err = proc.stdout.read(), proc.stderr.read()
+    assert proc.returncode == 0, err
+    spec = json.loads(out)["hookSpecificOutput"]
+    assert spec["permissionDecision"] == "deny"
+    assert "GateSignal" in spec["permissionDecisionReason"]
+    statuses = [r["status"] for r in db.all("SELECT status FROM gate_actions WHERE run_id = ? ORDER BY id", RUN)]
+    assert "pending" not in statuses and "expired" in statuses

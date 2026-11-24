@@ -30,6 +30,7 @@ import argparse
 import json
 import os
 import shlex
+import signal
 import sys
 
 if __package__ in (None, ""):
@@ -40,6 +41,8 @@ SERVER_NAME = "ei-gate"  # == hub.tool_names.GATE_SERVER (not imported: the hook
 HOOK_MATCHER = "Bash|WebFetch|Write|Edit|MultiEdit|NotebookEdit"
 HOOK_TIMEOUT = 86400  # seconds, Claude Code's hook timeout
 HOOK_WAIT = 86000  # our own deadline, strictly below HOOK_TIMEOUT: Claude Code's timeout fails open
+GATE_WAIT = HOOK_WAIT  # the MCP permission tool's wait is bounded the same way (expiry = deny)
+MALFORMED = "malformed permission request"
 
 STRING = {"type": "string", "minLength": 1}
 
@@ -60,8 +63,10 @@ TOOLS = {
         "description": "Claude Code permission-prompt tool: decides one tool call through the engagement gate.",
         "inputSchema": {
             "type": "object",
-            "properties": {"tool_name": STRING, "input": {"type": "object"}, "tool_use_id": {"type": "string"}},
-            "required": ["tool_name", "input"],
+            # Deliberately unconstrained: a malformed request must get a deny reply from
+            # permission(), never an isError from schema validation (spec §4: only replies decide).
+            "properties": {},
+            "required": [],
         },
     },
 }
@@ -99,10 +104,13 @@ def serve_main(args):
     run_id = os.environ.get("EI_RUN_ID") or None
 
     def permission(a):
+        if not isinstance(a.get("tool_name"), str) or not isinstance(a.get("input"), dict):
+            return _text(json.dumps({"behavior": "deny", "message": MALFORMED}))
         try:
             ctx = context_for_run(db, run_id, args.repo_root)
             reply = check_permission(
-                db, ctx, a["tool_name"], a["input"], lambda aid: wait_for_decision(db, aid, run_id=ctx.run_id)
+                db, ctx, a["tool_name"], a["input"],
+                lambda aid: wait_for_decision(db, aid, timeout=GATE_WAIT, run_id=ctx.run_id),
             )
         except Exception as err:  # check_permission already fails closed; this covers context lookup
             reply = {"behavior": "deny", "message": f"gate error: {type(err).__name__}"}
@@ -122,6 +130,14 @@ def serve_main(args):
 
 # ---- PreToolUse hook mode ----------------------------------------------------------------------
 
+class GateSignal(Exception):
+    """SIGTERM/SIGHUP while waiting: an Exception, so check_permission expires the pending action and denies."""
+
+
+def _raise_on_signal(signum, _frame):
+    raise GateSignal(f"signal {signum}")
+
+
 def _hook_decide(argv) -> dict:
     args = _parse_args(argv)
     payload = json.loads(sys.stdin.read())
@@ -134,6 +150,8 @@ def _hook_decide(argv) -> dict:
     from hub.db import open_db
     from hub.gate_service import check_permission, context_for_run, wait_for_decision
 
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, _raise_on_signal)
     db = open_db(args.db)
     try:
         ctx = context_for_run(db, os.environ.get("EI_RUN_ID") or None, args.repo_root)
@@ -145,7 +163,16 @@ def _hook_decide(argv) -> dict:
         db.close()
 
 
-def hook_main(argv) -> int:
+def _ignore_signals():
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        try:
+            signal.signal(sig, signal.SIG_IGN)
+        except BaseException:  # noqa: B036
+            pass
+
+
+def hook_main(argv) -> None:
+    """Decide, write the decision, and `os._exit` (0, or 2 if the decision can't be written). Never returns."""
     real_stdout = sys.stdout
     try:
         sys.stdout = sys.stderr  # nothing but our json.dumps decision may reach Claude Code's stdout
@@ -154,6 +181,7 @@ def hook_main(argv) -> int:
         reply = {"behavior": "deny", "message": f"gate hook error: {type(err).__name__}"}
     finally:
         sys.stdout = real_stdout
+    _ignore_signals()  # from here on, no signal can stop the decision being written
     try:
         out = json.dumps({
             "hookSpecificOutput": {
@@ -169,8 +197,8 @@ def hook_main(argv) -> int:
             sys.stderr.write("ei-gate: could not write the hook decision; blocking\n")
         except BaseException:  # noqa: B036
             pass
-        return 2
-    return 0
+        os._exit(2)
+    os._exit(0)  # immediately after the flush: no teardown that could print or change the exit code
 
 
 def hook_settings(python: str, gate_py: str, db_file: str, repo_root: str) -> dict:
@@ -181,7 +209,7 @@ def hook_settings(python: str, gate_py: str, db_file: str, repo_root: str) -> di
     q = shlex.quote
     inner = (
         f"{q(python)} {q(gate_py)} --hook --db {q(db_file)} --repo-root {q(repo_root)}"
-        " || { echo 'ei-gate: the gate hook failed; blocking the call' >&2; exit 2; }"
+        ' || { rc=$?; echo "ei-gate: the gate hook failed (exit $rc); blocking the call" >&2; exit 2; }'
     )
     return {
         "hooks": {
@@ -198,8 +226,7 @@ def hook_settings(python: str, gate_py: str, db_file: str, repo_root: str) -> di
 def main():
     argv = sys.argv[1:]
     if "--hook" in argv:
-        code = hook_main(argv)
-        os._exit(code)  # no interpreter teardown that could print or change the exit code
+        hook_main(argv)  # exits the process itself
     serve_main(_parse_args(argv))
 
 
