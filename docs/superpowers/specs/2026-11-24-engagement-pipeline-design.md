@@ -97,6 +97,39 @@ The same first task also verifies `claude -p --resume <session> --fork-session` 
 session that is still running (§5.5). The fallback is to allow "Ask" only while a stage is
 idle or paused at a gate, answering from a fork taken at the pause.
 
+**Verification results (Task 1)** — Claude Code 2.1.331, real `claude -p --model haiku` runs
+against a stdio MCP spike server exposing one tool, `permission`:
+
+- **Mechanism: `--permission-prompt-tool mcp__<server>__<tool>` works; no hook fallback needed.**
+  `--permission-prompts host` is the default and is not required (the flag can be omitted; with
+  `host` but no tool, un-allowed tools are just refused and the agent is told to ask the user).
+- **Which calls reach the tool:** only calls that would otherwise prompt. Read-only Bash such as
+  `echo hi` is auto-allowed by Claude Code and never reaches the tool; `echo hi > hi.txt` does.
+  Tasks 4/5 test with a write-style command.
+- **Request** (`tools/call` params; `arguments` is exactly this, `_meta` is extra):
+  ```json
+  {"name":"permission","arguments":{"tool_name":"Bash",
+    "input":{"command":"echo hi > hi.txt","description":"Run echo hi redirected to hi.txt"},
+    "tool_use_id":"toolu_013xiA1ANVx14Fi7pRSySaVg"},
+   "_meta":{"claudecode/toolUseId":"toolu_013xiA1ANVx14Fi7pRSySaVg","progressToken":2}}
+  ```
+  `tool_name` string, `input` object (the tool's own input), `tool_use_id` string.
+- **Reply** is one MCP text content whose text is a JSON string:
+  - allow: `{"behavior":"allow","updatedInput":{…}}` runs the (possibly edited) input.
+    `{"behavior":"allow"}` alone also works and runs the original input, so `updatedInput`
+    is optional (echo `input` back anyway to be safe).
+  - deny: `{"behavior":"deny","message":"Operator denied: …"}`. The command does not run, and the
+    message reaches the agent verbatim as the tool_result (`is_error:true`); the agent
+    stops and reports it. The stream's final `result` event also lists it under `permission_denials`.
+- **Blocking:** the session waits for the tool's reply for as long as it takes (tested 25s) and
+  then continues normally with the same session id; nothing times out at that length.
+- **Fork while running: works.** While the original was blocked in the permission tool,
+  `claude -p --model haiku --tools Read --resume <id> --fork-session -- "what were you about to run and why?"`
+  answered correctly ("`echo hi > hi.txt` because you asked me to…, the call was interrupted"),
+  under a new session id, and the original then continued and completed unaffected. Gotchas:
+  `--tools` is variadic, so put the prompt after `--` (or before the flag); and the fork sees the
+  pending tool call as interrupted. No need to restrict Ask to paused stages.
+
 ## 5. Design (decided with the operator)
 
 ### 5.1 Engagement and stages
