@@ -526,3 +526,53 @@ def test_value_allowances_do_not_leak_across_programs(flag, value, prog):
 def test_per_program_legit_shapes_stay_in(cmd):
     hosts, indirect = extract_hosts(cmd)
     assert scope_verdict(hosts, indirect, IN + ["in.scope.com:3128"]) == "in", (cmd, hosts, indirect)
+
+
+# ---- R14: fetch_verdict (WebFetch) ----
+
+from hub.gate_rules import fetch_verdict  # noqa: E402
+
+
+def _fv(url, scope):
+    return fetch_verdict(*extract_hosts(url, strict=False), scope)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://localhost:3000/", "http://localhost/", "http://intranet/", "http://foo.localhost:3000/",
+        "http://127.1:3000/", "http://2130706433:3000/", "http://0x7f.1:3000/", "http://0177.0.0.1:3000/",
+        "http://0x7f000001:3000/", "http://[::ffff:127.0.0.1]:3000/", "http://[::1]:3000/", "http://10.0.0.5/",
+        "http://127.0.0.1.nip.io:3000/", "http://127-0-0-1.sslip.io/", "http://x.xip.io/", "http://a.localtest.me/",
+        "http://lvh.me/", "http://app.lvh.me:3000/", "http://7f000001.nip.io/", "http://magic.127.0.0.1.example.com/",
+        "http://printer.local/", "http://db.internal/", "http://www.example.com./x",
+        "http://127.0.0.1:8080/",  # port-only mismatch
+    ],
+)
+def test_fetch_verdict_aliases_unknown(url):
+    expected = "out" if url == "http://www.example.com./x" else "unknown"
+    assert _fv(url, ["127.0.0.1:3000"]) == expected, url
+
+
+@pytest.mark.parametrize(
+    "url,scope",
+    [
+        ("https://app.example.com/", ["app.example.com:443"]),  # scheme-default port vs explicit port
+        ("https://app.example.com:8443/", ["app.example.com:443"]),
+        ("https://APP.example.com./", ["app.example.com:443"]),
+        ("https://example.com/", ["app.example.com"]),  # parent
+        ("https://x.app.example.com/", ["app.example.com"]),  # subdomain
+        ("https://example.com/", ["*.example.com"]),  # apex of a wildcard
+        ("https://evil.com/?u=https://app.example.com/", ["app.example.com"]),  # mixes an in-scope host
+    ],
+)
+def test_fetch_verdict_related_hosts_unknown(url, scope):
+    assert _fv(url, scope) == "unknown", (url, scope)
+
+
+def test_fetch_verdict_plain_unrelated_is_out_and_exact_is_in():
+    assert _fv("https://nvd.nist.gov/vuln/detail/CVE-2024-1", ["127.0.0.1:3000"]) == "out"
+    assert _fv("https://github.com/juice-shop/juice-shop", ["app.example.com"]) == "out"
+    assert _fv("https://other.example.com/", ["app.example.com"]) == "out"  # sibling: neither parent nor subdomain
+    assert _fv("http://127.0.0.1:3000/rest", ["127.0.0.1:3000"]) == "in"
+    assert _fv("http://$H/", ["127.0.0.1:3000"]) == "unknown"

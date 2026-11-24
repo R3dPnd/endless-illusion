@@ -404,6 +404,71 @@ def scope_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str]) -> s
     return "in"
 
 
+# Wildcard-DNS services that resolve `<ip>.<service>` (or every name under them) to an
+# address of the caller's choosing -- most to loopback.  Any name under one is an alias.
+WILDCARD_DNS_SUFFIXES = (
+    "nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me", "traefik.me", "local.gd", "vcap.me",
+    "lacolhost.com",
+)
+# Special-use / private names: they resolve to loopback or a local network, never the public web.
+_SPECIAL_TLDS = frozenset("localhost local internal lan home corp intranet localdomain arpa test invalid".split())
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_\-]{0,61}[a-z0-9_])?$")
+_DNS_TLD_RE = re.compile(r"^(?:[a-z]{2,63}|xn--[a-z0-9\-]{1,59})$")
+_EMBEDDED_IP_LABEL_RE = re.compile(r"\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}|^[0-9a-f]{8}$")
+
+
+def plain_dns_name(host: str) -> bool:
+    """True only for an ordinary public multi-label DNS name.
+
+    False for IP literals in any spelling (dotted, shortened, decimal, hex, octal,
+    IPv6 / IPv4-mapped), `localhost` and other single-label or special-use names
+    (`.local`, `.internal`, `.localhost`, ...), wildcard-DNS services (`*.nip.io`,
+    `*.sslip.io`, ...), and names embedding an IPv4 address (`127.0.0.1.example.com`,
+    `127-0-0-1.x.com`, `7f000001.x.com`): each can be an alias of an in-scope host."""
+    if not host or host.startswith("[") or ":" in host:
+        return False
+    labels = host.split(".")
+    if len(labels) < 2 or not all(_DNS_LABEL_RE.match(label) for label in labels):
+        return False
+    if not _DNS_TLD_RE.match(labels[-1]) or labels[-1] in _SPECIAL_TLDS:
+        return False
+    if any(host == s or host.endswith("." + s) for s in WILDCARD_DNS_SUFFIXES):
+        return False
+    if any(_EMBEDDED_IP_LABEL_RE.search(label) for label in labels):
+        return False
+    numeric = [label.isdigit() for label in labels]
+    return not any(all(numeric[i : i + 4]) for i in range(len(labels) - 3))
+
+
+def _related(host: str, scope_host: str) -> bool:
+    """`host` equals, is a parent of, or is a subdomain of the scope entry's host (ports ignored)."""
+    base = scope_host[2:] if scope_host.startswith("*.") else scope_host
+    if not base or "*" in base:
+        return False
+    return host == base or host.endswith("." + base) or base.endswith("." + host)
+
+
+def fetch_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str]) -> str:
+    """`"in"` | `"out"` | `"unknown"` for a WebFetch URL (Ruling R14).
+
+    `"out"` -- the only verdict the gate auto-allows for WebFetch -- needs every
+    host to be a `plain_dns_name` that matches no scope entry even ignoring ports
+    and is neither a parent nor a subdomain of a scope host.  An exact in-scope
+    URL is `"in"`; everything else (aliases, IPs, port-only mismatches, no host,
+    indirection) is `"unknown"`: gated, and approving it needs scopeAck."""
+    verdict = scope_verdict(hosts, indirect, scope_hosts)
+    if verdict in ("in", "unknown"):
+        return verdict
+    if verdict == "none":
+        return "unknown"
+    entries = [e for e in (_norm_entry(s) for s in scope_hosts if s and s.strip()) if e]
+    for h in hosts:
+        n = _norm_entry(h)
+        if n is None or not plain_dns_name(n[0]) or any(_related(n[0], e[0]) for e in entries):
+            return "unknown"
+    return "out"
+
+
 # ---------------------------------------------------------------- path rules
 
 

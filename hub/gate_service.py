@@ -5,7 +5,9 @@ Every tool call an engagement stage makes passes through `check_permission`
 hub, not a prompt, decides; the default on any doubt is deny.
 
 - Local-only Bash, in-workdir writes, off-scope WebFetch reading and non-gated
-  tools are auto-allowed.
+  tools are auto-allowed. "Off-scope" for WebFetch is strict (Ruling R14, see
+  `gate_rules.fetch_verdict`): a plain public DNS name unrelated to every scope
+  host. IPs, localhost, wildcard-DNS names and port-only mismatches are gated.
 - Writes outside `research/<slug>/` are auto-denied.
 - Anything that touches a target needs a matching, unused `declare_action`
   declaration from the same run, then waits (`pending`) for the operator.
@@ -29,7 +31,7 @@ from pathlib import Path
 from typing import Callable
 
 from .db import now_iso
-from .gate_rules import classify_bash, classify_write, extract_hosts, scope_verdict
+from .gate_rules import classify_bash, classify_write, extract_hosts, fetch_verdict, scope_verdict
 
 DECLARE_FIRST = "call declare_action with why, technique and risk first"
 OPERATOR_DENIED = "operator denied"
@@ -180,8 +182,10 @@ def _decide_call(db, ctx, tool_name, tool_input, set_pending) -> dict | None:
             _record(db, ctx, tool_name, tool_input, "auto_denied", "none", message="WebFetch needs a url")
             return _deny("WebFetch needs a url")
         hosts, indirect = extract_hosts(target, strict=False)
-        verdict = scope_verdict(hosts, indirect, ctx.scope_hosts)
-        if verdict in ("out", "none"):  # off-scope research reading is free
+        # R14: only a plain public DNS name unrelated to every scope host is free research reading.
+        # Aliases (IPs, localhost, wildcard DNS) and port-only mismatches come back "unknown": gated.
+        verdict = fetch_verdict(hosts, indirect, ctx.scope_hosts)
+        if verdict == "out":
             _record(db, ctx, tool_name, tool_input, "auto_allowed", verdict, hosts)
             return _allow()
     else:

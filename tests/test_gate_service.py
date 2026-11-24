@@ -476,3 +476,60 @@ def test_multiedit_is_a_write_tool(db, tmp_path):
     assert reply["behavior"] == "deny"
     assert last_action(db)["status"] == "auto_denied"
     assert check_permission(db, ctx, "MultiEdit", {"file_path": str(ctx.workdir / "x.md")}, no_wait)["behavior"] == "allow"
+
+
+# ---- R14: WebFetch auto-allows only plain, unrelated DNS names ----
+
+
+def _ctx_with_scope(db, tmp_path, scope, run_id="run-wf"):
+    e = create_engagement(db, f"wf {run_id}", "lab", scope, "", "my own lab")
+    add_stage(db, e["id"], "web", run_id, True)
+    return context_for_run(db, run_id, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "scope,url",
+    [
+        (["app.example.com:443"], "https://app.example.com/"),
+        (["127.0.0.1:3000"], "http://localhost:3000/"),
+        (["127.0.0.1:3000"], "http://127.1:3000/"),
+        (["127.0.0.1:3000"], "http://2130706433:3000/"),
+        (["127.0.0.1:3000"], "http://[::ffff:127.0.0.1]:3000/"),
+        (["127.0.0.1:3000"], "http://127.0.0.1.nip.io:3000/"),
+        (["127.0.0.1:3000"], "http://0x7f.1:3000/"),
+        (["127.0.0.1:3000"], "http://127.0.0.1:8080/"),
+        (["app.example.com"], "https://example.com/"),
+        (["app.example.com"], "https://api.app.example.com/"),
+    ],
+)
+def test_webfetch_aliases_and_port_mismatches_are_gated(db, tmp_path, scope, url):
+    ctx = _ctx_with_scope(db, tmp_path, scope)
+    # Undeclared: denied (never auto-allowed), recorded with verdict unknown.
+    reply = check_permission(db, ctx, "WebFetch", {"url": url, "prompt": "x"}, no_wait)
+    assert (reply["behavior"], reply["message"]) == ("deny", DECLARE_FIRST)
+    assert (last_action(db)["status"], last_action(db)["verdict"]) == ("auto_denied", "unknown")
+    # Declared: goes pending with verdict unknown, so approving it needs scopeAck.
+    declare(db, ctx, url)
+    t, errors = decide_when_pending(db, ctx.run_id, approve=True)
+    waited = threading.Thread(target=lambda: check_permission(db, ctx, "WebFetch", {"url": url, "prompt": "x"}, waiter(db)), daemon=True)
+    waited.start()
+    t.join(5)
+    assert len(errors) == 1 and isinstance(errors[0], GateRefused)
+    a = db.get("SELECT * FROM gate_actions WHERE run_id = ? AND status = 'pending'", ctx.run_id)
+    assert a is not None and a["verdict"] == "unknown"
+    decide(db, a["id"], False)
+    waited.join(5)
+
+
+@pytest.mark.parametrize("url", ["https://nvd.nist.gov/vuln/detail/CVE-2024-1", "https://github.com/juice-shop/juice-shop"])
+def test_webfetch_research_sites_still_auto_allowed(db, tmp_path, url):
+    ctx = _ctx_with_scope(db, tmp_path, ["127.0.0.1:3000"])
+    assert check_permission(db, ctx, "WebFetch", {"url": url, "prompt": "x"}, no_wait)["behavior"] == "allow"
+    assert (last_action(db)["status"], last_action(db)["verdict"]) == ("auto_allowed", "out")
+
+
+def test_webfetch_exact_in_scope_url_gated_as_in(db, tmp_path):
+    ctx = _ctx_with_scope(db, tmp_path, ["127.0.0.1:3000"])
+    url = "http://127.0.0.1:3000/rest/products"
+    assert check_permission(db, ctx, "WebFetch", {"url": url, "prompt": "x"}, no_wait)["message"] == DECLARE_FIRST
+    assert last_action(db)["verdict"] == "in"

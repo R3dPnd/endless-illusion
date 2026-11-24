@@ -283,11 +283,16 @@ against a stdio MCP spike server exposing one tool, `permission`:
   logged in the stage history. The classifier needs thorough tests, since a mistake here lets
   traffic through.
 - `WebFetch` when the URL's host matches a host in the engagement scope, including subdomains of
-  wildcard entries;
+  wildcard entries; **and (Ruling R14) every WebFetch whose host is not a plain public multi-label
+  DNS name unrelated to the scope**: IP literals in any spelling (`127.1`, `2130706433`,
+  `0x7f.1`, `[::ffff:127.0.0.1]`), `localhost` and single-label or special-use names,
+  wildcard-DNS services (`*.nip.io`, `*.sslip.io`, `*.xip.io`, `*.localtest.me`, `*.lvh.me`),
+  names embedding an IPv4 address, parents or subdomains of a scope host, and port-only
+  mismatches. These get verdict `unknown`, so approving them needs scopeAck;
 - any future target-touching tool listed in a policy as gated.
 
 Everything else in the stage's toolset runs without asking: Read, Grep, WebSearch, WebFetch to
-other hosts, and the memory and notes tools.
+plain, unrelated public hosts (`nvd.nist.gov`, `github.com`), and the memory and notes tools.
 
 **Mechanism:**
 - Gated tools are left out of `--allowedTools`, so Claude Code consults the permission prompt
