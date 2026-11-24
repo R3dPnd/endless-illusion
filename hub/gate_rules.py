@@ -126,35 +126,125 @@ def _scan_hosts(text: str, file_like: bool) -> list[str]:
     return hosts
 
 
-_FLAG_RE = re.compile(r"^(?:-[A-Za-z]{1,6}|--[A-Za-z][A-Za-z0-9\-]*)$")
-_METHOD_RE = re.compile(r"^[A-Z]{3,7}$")
-_SMALL_INT_RE = re.compile(r"^\d{1,5}$")
+_KNOWN_HEADS = frozenset(
+    "curl wget ssh nc nmap http httpie python python3 node ruby perl dig nslookup host ping".split()
+) | LOCAL_COMMANDS
+_BOOL_CLUSTER = frozenset("sSikLvfIqnN46")
+_SHORT_METHOD = frozenset("X")
+_SHORT_NUM = frozenset("mpPr")
+_SHORT_VALUE = frozenset("xJKioOdHeAbcuTF")
+_SHORT_OUT = frozenset("oO")  # only output-file flags may take a workdir path (others read it as input)
+_LONG_METHOD = frozenset({"--request"})
+_LONG_NUM = frozenset({"--max-time", "--connect-timeout", "--retry", "--limit-rate", "--max-redirs"})
+_LONG_VALUE = frozenset(
+    """--proxy --connect-to --resolve --output --data --header --referer --user-agent --cookie --cookie-jar
+    --user --upload-file --form --proxy-user --config --interface --dns-servers --doh-url --socks5
+    --socks5-hostname --preproxy --json --url --data-raw --data-binary --data-urlencode""".split()
+)
+_LONG_OUT = frozenset({"--output"})
+_LONG_FLAG_RE = re.compile(r"^--[A-Za-z][A-Za-z0-9\-]*$")
+_METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
+_NUM_RE = re.compile(r"^\d{1,6}$")
+_URLWORD_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//([^\s'\"`<>/?#\\]+)(?:[/?#]\S*)?$")
+_USER_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+def _recognized_value(word: str, workdir: Path | None, paths_ok: bool = False) -> bool:
+    """True iff the whole word is exactly one host, `user@host`, a parsed URL,
+    or an absolute path inside workdir -- no unaccounted-for fragments."""
+    if paths_ok and workdir is not None and word.startswith("/") and _inside(word, workdir):
+        return True
+    m = _URLWORD_RE.match(word)
+    if m:
+        return _authority(m.group(1)) is not None
+    if "@" in word:
+        user, _, rest = word.rpartition("@")
+        if not _USER_RE.match(user):
+            return False
+        word = rest
+    word = word.lower().strip(".")
+    hosts = _scan_hosts(word, True)
+    return len(hosts) == 1 and hosts[0] == word
 
 
 def _unclassified_words(text: str, workdir: Path | None) -> bool:
-    """True if a non-head word is neither a flag, a host, a method, a small int,
-    nor an absolute path inside workdir (so it could hide an undetected host)."""
+    """True if anything could hide an undetected host: an unknown program name,
+    an unknown/attached-value flag, or a word that is not exactly one host/URL
+    (or an absolute path inside workdir).  Integers and upper-case words are
+    accepted only as the value of a known numeric / method flag."""
     try:
         toks = _tokenize(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
     except _Unparseable:
         return True
     at_head = True
+    expect: str | None = None  # "method" | "num" | "value"
+
+    head = ""
+
+    def check(kind: str, val: str) -> bool:
+        if kind == "method":
+            return bool(_METHOD_RE.match(val))
+        if kind == "num":
+            return bool(_NUM_RE.match(val))
+        return _recognized_value(val, workdir, paths_ok=(kind == "out"))
+
     for kind, val in toks:
         if kind == "op":
             at_head = val in _SPLIT_OPS
+            expect = None
             continue
         if at_head:
             at_head = False
+            head = val
+            if val not in _KNOWN_HEADS:
+                return True
             continue
-        for part in val.split() or [val]:
-            if _FLAG_RE.match(part) or _METHOD_RE.match(part) or _SMALL_INT_RE.match(part):
+        if expect:
+            ok = check(expect, val)
+            expect = None
+            if not ok:
+                return True
+            continue
+        if val == "--":
+            continue
+        if val.startswith("--"):
+            name, eq, value = val.partition("=")
+            if not _LONG_FLAG_RE.match(name):
+                return True
+            kind_ = (
+                "method" if name in _LONG_METHOD else "num" if name in _LONG_NUM
+                else "out" if name in _LONG_OUT else "value"
+            )
+            if eq:
+                if not check(kind_, value):
+                    return True
+            elif name in _LONG_METHOD:
+                expect = "method"
+            elif name in _LONG_NUM:
+                expect = "num"
+            elif name in _LONG_OUT:
+                expect = "out"
+            elif name in _LONG_VALUE:
+                expect = "value"
+            continue
+        if val.startswith("-") and len(val) > 1:
+            letters = val[1:]
+            if len(letters) == 1 and letters.isalnum():
+                if letters in _SHORT_METHOD:
+                    expect = "method"
+                elif letters in _SHORT_NUM:
+                    expect = "num"
+                elif letters in _SHORT_OUT:
+                    expect = "out"
+                elif letters in _SHORT_VALUE:
+                    expect = "value"
                 continue
-            if _scan_hosts(part, True):
-                continue
-            if workdir is not None and part.startswith("/") and _inside(part, workdir):
+            if all(c in _BOOL_CLUSTER for c in letters):
                 continue
             return True
-    return False
+        if not _recognized_value(val, workdir, paths_ok=head in LOCAL_COMMANDS):
+            return True
+    return expect is not None
 
 
 def extract_hosts(

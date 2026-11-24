@@ -351,3 +351,57 @@ def test_unbracketed_ipv6_detected():
 def test_strict_ok_shapes_stay_known():
     assert extract_hosts("curl -s -X POST http://localhost:3000/x -m 5") == (["localhost:3000"], False)
     assert extract_hosts("curl in.scope.com")[1] is False
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "ssh -J in.scope.com,evil in.scope.com",
+        "ssh -oProxyJump=in.scope.com,evil in.scope.com",
+        "curl --connect-to in.scope.com:443:intranet:443 https://in.scope.com",
+        "curl -x in.scope.com:3128,evil in.scope.com",
+        "curl in.scope.com:evil",
+        "curl -x EVIL in.scope.com",
+        "curl in.scope.com EVIL",
+        "curl in.scope.com GOOGLE",
+        "curl -xevil in.scope.com",
+        "ssh -Jevil in.scope.com",
+        "curl -Kcfg in.scope.com",
+        "wget -iurls in.scope.com",
+        "curl in.scope.com 0",
+        "curl in.scope.com 2130",
+        "curl in.scope.com 99999",
+        "curl in.scope.com\nevil",
+        "curl in.scope.com ;evil",
+        "curl in.scope.com |evil",
+        "curl in.scope.com && evil",
+        "curl -x",
+        "curl --foo=intranet in.scope.com",
+        "curl --proxy intranet in.scope.com",
+        "curl -m evil in.scope.com",
+    ],
+)
+def test_strict_allowances_do_not_hide_hosts(cmd):
+    hosts, indirect = extract_hosts(cmd)
+    assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), (cmd, hosts, indirect)
+
+
+def test_strict_legit_shapes_stay_known():
+    for cmd in [
+        "curl -sSL -X POST --max-time 5 -m 3 https://in.scope.com/a?b=c",
+        "curl --request=PUT in.scope.com:8443",
+        "ssh root@in.scope.com",
+        "curl -x in.scope.com:3128 in.scope.com",
+        "ssh -p 22 in.scope.com",
+    ]:
+        hosts, indirect = extract_hosts(cmd)
+        assert indirect is False, cmd
+        assert scope_verdict(hosts, indirect, IN + ["in.scope.com:3128", "in.scope.com:8443"]) == "in", cmd
+
+
+def test_input_file_flags_with_workdir_path_not_in(wd):
+    for cmd in [f"curl -K {wd}/cfg in.scope.com", f"curl --config {wd}/cfg in.scope.com", f"wget -i {wd}/urls in.scope.com", f"curl {wd}/x in.scope.com"]:
+        hosts, indirect = extract_hosts(cmd, workdir=wd)
+        assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), cmd
+    hosts, indirect = extract_hosts(f"curl -o {wd}/x in.scope.com", workdir=wd)
+    assert scope_verdict(hosts, indirect, IN) == "in"
