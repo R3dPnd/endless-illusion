@@ -10,6 +10,14 @@ Usage:
     okay-dann status            what's running, and which ports are taken
     okay-dann stop              stop every Endless Illusion process, including orphans
     okay-dann restart           stop and relaunch with the same subcommand/flags
+    okay-dann backup setup      store Cloudflare R2 credentials for Litestream
+    okay-dann backup status     replication status and the newest backups
+    okay-dann backup now        one immediate sync (when the hub isn't running)
+    okay-dann backup restore    restore the hub database from R2
+
+Backups: once `backup setup` has run, app/dev/web also run `litestream
+replicate` beside the hub, continuously streaming data/endless-illusion.db to
+R2 (litestream.yml). Credentials live in litestream.env, which is gitignored.
 
 Install: ln -sf "$PWD/okay_dann.py" ~/.local/bin/okay-dann
 
@@ -22,7 +30,10 @@ they work on macOS/Linux only.
 from __future__ import annotations
 
 import argparse
+import getpass
 import os
+import shutil
+import threading
 import signal
 import subprocess
 import sys
@@ -33,12 +44,22 @@ ROOT = Path(__file__).resolve().parent
 PND = ROOT / "pnd.py"
 UI = ROOT / "ui"
 PORTS = {"hub API": 8787, "Vite": 5173}
+DB_PATH = ROOT / "data" / "endless-illusion.db"
+LITESTREAM_CONFIG = ROOT / "litestream.yml"
+LITESTREAM_ENV = ROOT / "litestream.env"  # gitignored (*.env)
+# What `backup setup` asks for, in order: (key, prompt, secret?)
+BACKUP_FIELDS = [
+    ("R2_ACCOUNT_ID", "Cloudflare account ID", False),
+    ("R2_BUCKET", "R2 bucket name", False),
+    ("LITESTREAM_ACCESS_KEY_ID", "R2 API token Access Key ID", False),
+    ("LITESTREAM_SECRET_ACCESS_KEY", "R2 API token Secret Access Key", True),
+]
 
 # How the launchers appear in a command line: this file, its symlink, or pnd.py.
 LAUNCHER_NAMES = {"okay_dann.py", "okay-dann"}
 PND_NAMES = {"pnd.py"}
 # Control subcommands: never "Endless Illusion running", so never stopped or relaunched.
-CONTROL = {"stop", "restart", "status"}
+CONTROL = {"stop", "restart", "status", "backup"}
 # One-shot runs: stoppable, but not something `restart` should relaunch.
 ONE_SHOT = CONTROL | {"test", "chat"}
 
@@ -82,7 +103,20 @@ def classify(argv: list[str], root: Path = ROOT, cwd: str | None = None) -> str 
         return "service"
     if str(root / "ui") in joined and "vite" in joined and "build" not in argv:
         return "service"
+    if is_litestream(argv, root):
+        return "service"
     return None
+
+
+def is_litestream(argv: list[str], root: Path = ROOT) -> bool:
+    """`litestream replicate -config <this repo>/litestream.yml` (not -once)."""
+    return (
+        bool(argv)
+        and PurePath(argv[0]).name == "litestream"
+        and "replicate" in argv
+        and "-once" not in argv
+        and str(root / "litestream.yml") in argv
+    )
 
 
 def is_hub(argv: list[str]) -> bool:
@@ -193,13 +227,106 @@ def terminate(pids: list[int], timeout: float = 6.0) -> list[int]:
 # --- subcommands ---
 
 
-def run_pnd(*flags: str) -> int:
+# --- Litestream (backup to Cloudflare R2) ---
+
+
+def read_env_file(path: Path) -> dict[str, str]:
+    """KEY=VALUE lines; blank lines and # comments ignored, optional quotes stripped."""
+    env = {}
+    if not path.exists():
+        return env
+    for line in path.read_text(encoding="utf8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        env[key.strip()] = value.strip().strip("'\"")
+    return env
+
+
+def replica_url(env: dict[str, str]) -> str | None:
+    """EI_REPLICA_URL if set (any Litestream URL, e.g. file:// for testing),
+    otherwise the R2 bucket built from the account ID and bucket name."""
+    if env.get("EI_REPLICA_URL"):
+        return env["EI_REPLICA_URL"]
+    account, bucket = env.get("R2_ACCOUNT_ID"), env.get("R2_BUCKET")
+    if not (account and bucket):
+        return None
+    return f"s3://{bucket}/endless-illusion?endpoint=https://{account}.r2.cloudflarestorage.com&region=auto"
+
+
+def litestream_env(file_env: dict[str, str] | None = None, base: dict[str, str] | None = None) -> dict[str, str] | None:
+    """Environment for litestream (litestream.yml reads it via ${VAR}), or None
+    when backups aren't configured. Shell variables override the file."""
+    env = {**(read_env_file(LITESTREAM_ENV) if file_env is None else file_env), **{
+        k: v for k, v in (os.environ if base is None else base).items()
+        if k.startswith(("R2_", "LITESTREAM_", "EI_REPLICA_URL"))
+    }}
+    url = replica_url(env)
+    if not url:
+        return None
+    if url.startswith("s3://") and not (env.get("LITESTREAM_ACCESS_KEY_ID") and env.get("LITESTREAM_SECRET_ACCESS_KEY")):
+        return None
+    env.setdefault("LITESTREAM_ACCESS_KEY_ID", "")
+    env.setdefault("LITESTREAM_SECRET_ACCESS_KEY", "")
+    return {**(os.environ if base is None else base), **env, "EI_REPLICA_URL": url, "EI_DB_PATH": str(DB_PATH)}
+
+
+def litestream(command: str, *args: str, env: dict[str, str], **kw) -> subprocess.CompletedProcess:
+    """`litestream <command> -config litestream.yml <args>`: flags must precede any DB path."""
+    return subprocess.run(["litestream", command, "-config", str(LITESTREAM_CONFIG), *args], env=env, **kw)
+
+
+def start_replication() -> subprocess.Popen | None:
+    """Start continuous replication beside the hub, if backups are configured.
+    Its own session, so Ctrl+C reaches pnd.py first and litestream is stopped
+    afterwards — catching the hub's final writes on the way out."""
+    env = litestream_env()
+    if env is None:
+        return None
+    if not shutil.which("litestream"):
+        say("backups are configured but `litestream` isn't on PATH; running without them.")
+        return None
+    if any(kind == "service" and is_litestream(argv) for _, kind, argv in find_running()):
+        return None  # another launcher is already replicating
+    proc = subprocess.Popen(
+        ["litestream", "replicate", "-config", str(LITESTREAM_CONFIG)],
+        env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, start_new_session=True,
+    )
+
+    def pump() -> None:
+        for line in proc.stdout:
+            print(f"\033[32m[backup]\033[0m {line}", end="", flush=True)
+
+    threading.Thread(target=pump, daemon=True).start()
+    say(f"backing up the hub database to {env['EI_REPLICA_URL'].split('?')[0]} (pid {proc.pid})")
+    return proc
+
+
+def run_pnd(*flags: str, backup: bool = True) -> int:
     """Run pnd.py in the foreground (Ctrl+C reaches both, as they share the
-    terminal's process group). A child rather than exec, so this okay-dann
-    command line, with its subcommand, stays visible for `restart` to read."""
+    terminal's process group), with Litestream beside it when configured. A
+    child rather than exec, so this okay-dann command line, with its
+    subcommand, stays visible for `restart` to read."""
     os.chdir(ROOT)
-    proc = subprocess.run([sys.executable, str(PND), *flags])
-    return proc.returncode
+    replication = start_replication() if backup else None
+
+    # Ctrl+C and `okay-dann stop` both reach pnd.py directly (same terminal
+    # process group / it's in stop's target list), so here we only keep
+    # waiting for pnd.py's own shutdown, then stop litestream after it.
+    signal.signal(signal.SIGTERM, lambda *_: None)
+    proc = subprocess.Popen([sys.executable, str(PND), *flags])
+    try:
+        while True:
+            try:
+                return proc.wait()
+            except KeyboardInterrupt:
+                continue
+    finally:
+        if proc.poll() is None:
+            terminate([proc.pid])
+        if replication is not None:
+            terminate([replication.pid], timeout=15)  # litestream flushes pending WAL on SIGTERM
 
 
 def cmd_app(args) -> int:
@@ -215,7 +342,7 @@ def cmd_web(args) -> int:
 
 
 def cmd_test(args) -> int:
-    return run_pnd("--test")
+    return run_pnd("--test", backup=False)
 
 
 def cmd_chat(args) -> int:
@@ -268,6 +395,102 @@ def cmd_restart(args) -> int:
     return main(relaunch)
 
 
+def require_backup_env() -> dict[str, str] | None:
+    if not shutil.which("litestream"):
+        say("`litestream` isn't on PATH. Install it: https://litestream.io/install/")
+        return None
+    env = litestream_env()
+    if env is None:
+        say("Backups aren't configured yet — run `okay-dann backup setup`.")
+    return env
+
+
+def replicating_now() -> bool:
+    return any(is_litestream(argv) for _, _, argv in find_running())
+
+
+def cmd_backup_setup(args) -> int:
+    current = read_env_file(LITESTREAM_ENV)
+    say("Store R2 credentials for Litestream (written to litestream.env, mode 600, gitignored).")
+    print("  Create the bucket and an R2 API token with Object Read & Write on that bucket only:")
+    print("  Cloudflare dashboard → R2 → Create bucket, then R2 → Manage API tokens.")
+    values = {}
+    for key, prompt, secret in BACKUP_FIELDS:
+        have = current.get(key, "")
+        hint = " [keep current]" if secret and have else (f" [{have}]" if have else "")
+        ask = getpass.getpass if secret else input
+        values[key] = ask(f"  {prompt}{hint}: ").strip() or have
+        if not values[key]:
+            say(f"{prompt} is required; nothing written.")
+            return 1
+    LITESTREAM_ENV.write_text(
+        "# Litestream → Cloudflare R2 credentials for okay-dann. Never commit.\n"
+        + "".join(f"{k}={v}\n" for k, v in values.items()),
+        encoding="utf8",
+    )
+    LITESTREAM_ENV.chmod(0o600)
+    say(f"Saved {LITESTREAM_ENV.name}. Run `okay-dann backup now` to take the first backup.")
+    return 0
+
+
+def cmd_backup_status(args) -> int:
+    env = require_backup_env()
+    if env is None:
+        return 1
+    say(f"replica: {env['EI_REPLICA_URL'].split('?')[0]}")
+    say("continuous replication: " + ("running" if replicating_now() else "not running (starts with app/dev/web)"))
+    status = litestream("status", env=env).returncode
+    say("snapshots on the replica:")
+    ltx = litestream("ltx", "-level", "9", str(DB_PATH), env=env).returncode
+    return status or ltx
+
+
+def cmd_backup_now(args) -> int:
+    env = require_backup_env()
+    if env is None:
+        return 1
+    if replicating_now():
+        say("Already replicating continuously beside the hub; nothing to do.")
+        return 0
+    if not DB_PATH.exists():
+        say(f"No database at {DB_PATH} yet — start the hub once first.")
+        return 1
+    say("Syncing the hub database to the replica...")
+    code = litestream("replicate", "-once", "-force-snapshot", env=env).returncode
+    say("Done." if code == 0 else f"litestream exited with code {code}.")
+    return code
+
+
+def cmd_backup_restore(args) -> int:
+    env = require_backup_env()
+    if env is None:
+        return 1
+    if args.in_place:
+        if find_running():
+            say("Stop Endless Illusion first (`okay-dann stop`): restoring in place under a live hub corrupts it.")
+            return 1
+        out = DB_PATH
+    else:
+        out = Path(args.to) if args.to else ROOT / "data" / "restored" / f"endless-illusion-{time.strftime('%Y%m%d-%H%M%S')}.db"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    flags = ["-o", str(out)]
+    if args.timestamp:
+        flags += ["-timestamp", args.timestamp]
+    if args.dry_run:
+        flags.append("-dry-run")
+    if out == DB_PATH and DB_PATH.exists() and not args.dry_run:
+        backup = DB_PATH.with_name(f"endless-illusion.pre-restore-{time.strftime('%Y%m%d-%H%M%S')}.db")
+        for suffix in ("", "-wal", "-shm"):
+            src = Path(f"{DB_PATH}{suffix}")
+            if src.exists():
+                shutil.move(src, f"{backup}{suffix}")
+        say(f"Moved the current database aside to {backup.name}")
+    code = litestream("restore", *flags, str(DB_PATH), env=env).returncode
+    if code == 0 and not args.dry_run:
+        say(f"Restored to {out}")
+    return code
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="okay-dann",
@@ -294,6 +517,18 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("status", help="show running processes and ports").set_defaults(run=cmd_status)
     sub.add_parser("stop", help="stop every Endless Illusion process, including orphans").set_defaults(run=cmd_stop)
     sub.add_parser("restart", help="stop and relaunch with the same subcommand/flags").set_defaults(run=cmd_restart)
+
+    backup = sub.add_parser("backup", help="Litestream backups of the hub database to Cloudflare R2")
+    backup_sub = backup.add_subparsers(dest="backup_command", metavar="<action>", required=True)
+    backup_sub.add_parser("setup", help="store R2 credentials in litestream.env").set_defaults(run=cmd_backup_setup)
+    backup_sub.add_parser("status", help="replication status and snapshots on R2").set_defaults(run=cmd_backup_status)
+    backup_sub.add_parser("now", help="one immediate sync (when the hub isn't running)").set_defaults(run=cmd_backup_now)
+    restore = backup_sub.add_parser("restore", help="restore the hub database from R2")
+    restore.add_argument("--to", help="output path (default: data/restored/endless-illusion-<time>.db)")
+    restore.add_argument("--in-place", action="store_true", help="replace data/endless-illusion.db (hub must be stopped; the old one is kept aside)")
+    restore.add_argument("--timestamp", help="point in time to restore to, e.g. 2026-11-23T14:00:00Z")
+    restore.add_argument("--dry-run", action="store_true", help="print the restore plan only")
+    restore.set_defaults(run=cmd_backup_restore)
     return parser
 
 

@@ -39,3 +39,34 @@ def test_restart_args():
     assert od.restart_args([(1, "launcher", [PY, "pnd.py"])]) == ["app"]
     assert od.restart_args([(1, "launcher", [PY, "/bin/okay-dann", "test"])]) is None
     assert od.restart_args([(1, "service", ["/repo/.venv/bin/python", "-m", "hub"])]) is None
+
+
+def test_litestream_process_is_a_service_only_for_this_repo():
+    assert od.classify(["litestream", "replicate", "-config", "/repo/litestream.yml"], ROOT) == "service"
+    assert od.classify(["/x/litestream", "replicate", "-once", "-config", "/repo/litestream.yml"], ROOT) is None
+    assert od.classify(["litestream", "replicate", "-config", "/other/litestream.yml"], ROOT) is None
+    assert od.classify([PY, "/bin/okay-dann", "backup", "status"], ROOT) is None
+
+
+def test_replica_url_for_r2_and_override():
+    url = od.replica_url({"R2_ACCOUNT_ID": "abc123", "R2_BUCKET": "ei-backups"})
+    assert url == "s3://ei-backups/endless-illusion?endpoint=https://abc123.r2.cloudflarestorage.com&region=auto"
+    assert od.replica_url({"EI_REPLICA_URL": "file:///tmp/r", "R2_BUCKET": "x"}) == "file:///tmp/r"
+    assert od.replica_url({"R2_BUCKET": "x"}) is None
+
+
+def test_litestream_env_requires_keys_for_r2():
+    r2 = {"R2_ACCOUNT_ID": "a", "R2_BUCKET": "b"}
+    assert od.litestream_env(r2, base={}) is None
+    env = od.litestream_env({**r2, "LITESTREAM_ACCESS_KEY_ID": "k", "LITESTREAM_SECRET_ACCESS_KEY": "s"}, base={})
+    assert env["EI_DB_PATH"] == str(od.DB_PATH) and env["EI_REPLICA_URL"].startswith("s3://b/")
+    # shell variables override the file; a file:// replica needs no keys
+    env = od.litestream_env(r2, base={"EI_REPLICA_URL": "file:///tmp/r"})
+    assert env["EI_REPLICA_URL"] == "file:///tmp/r"
+
+
+def test_read_env_file(tmp_path):
+    f = tmp_path / "x.env"
+    f.write_text("# comment\n\nR2_BUCKET='b'\nLITESTREAM_ACCESS_KEY_ID = \"k\"\nnoequals\n")
+    assert od.read_env_file(f) == {"R2_BUCKET": "b", "LITESTREAM_ACCESS_KEY_ID": "k"}
+    assert od.read_env_file(tmp_path / "missing.env") == {}

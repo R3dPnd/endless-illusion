@@ -1,0 +1,23 @@
+# Litestream: continuous backup of the hub database (data/endless-illusion.db)
+# to a private Cloudflare R2 bucket. `okay-dann app|dev|web` runs replication
+# alongside the hub; `okay-dann backup ...` manages it. No secrets live here:
+# every ${VAR} is filled in by okay-dann from litestream.env (gitignored,
+# written by `okay-dann backup setup`).
+
+access-key-id: ${LITESTREAM_ACCESS_KEY_ID}
+secret-access-key: ${LITESTREAM_SECRET_ACCESS_KEY}
+
+dbs:
+  - path: ${EI_DB_PATH}
+    replica:
+      url: ${EI_REPLICA_URL}
+      # Upload at most every 10s (default 1s). Each upload is an R2 write
+      # (Class A) op; 10s keeps a busy hub well inside the free tier, and
+      # at worst the last ~10s of writes are lost in a crash.
+      sync-interval: 10s
+
+# One full snapshot a day, kept for 30 days. Point-in-time restore works
+# anywhere inside that window.
+snapshot:
+  interval: 24h
+  retention: 720h
