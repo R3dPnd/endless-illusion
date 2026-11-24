@@ -70,3 +70,24 @@ def test_read_env_file(tmp_path):
     f.write_text("# comment\n\nR2_BUCKET='b'\nLITESTREAM_ACCESS_KEY_ID = \"k\"\nnoequals\n")
     assert od.read_env_file(f) == {"R2_BUCKET": "b", "LITESTREAM_ACCESS_KEY_ID": "k"}
     assert od.read_env_file(tmp_path / "missing.env") == {}
+
+
+def test_lab_release_asset_name():
+    # Real naming on juice-shop/juice-shop releases (v20.4.0): zip on macOS, tgz on Linux.
+    assert od.lab_release_asset("20.4.0", 26, "arm64", "darwin") == "juice-shop-20.4.0_node26_darwin_arm64.zip"
+    assert od.lab_release_asset("20.4.0", 22, "x86_64", "linux") == "juice-shop-20.4.0_node22_linux_x64.tgz"
+
+
+def test_lab_pick_node_major():
+    assets = ["juice-shop-20.4.0_node22_darwin_arm64.zip", "juice-shop-20.4.0_node24_darwin_arm64.zip"]
+    assert od.lab_pick_node_major(assets, 24, "arm64", "darwin") == 24
+    assert od.lab_pick_node_major(assets, 26, "arm64", "darwin") == 24  # highest published <= local
+    assert od.lab_pick_node_major(assets, 20, "arm64", "darwin") is None
+
+
+def test_lab_process_classified_as_service():
+    lab = od.LAB_DIR / "20.4.0" / "juice-shop_20.4.0" / "build" / "app.js"
+    assert od.classify(["node", str(lab)], ROOT) == "service"
+    assert od.classify(["/opt/homebrew/bin/node", str(lab)], ROOT) == "service"
+    assert od.classify(["node", "/elsewhere/build/app.js"], ROOT) is None
+    assert od.classify(["vim", str(lab)], ROOT) is None

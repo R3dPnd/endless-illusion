@@ -14,6 +14,7 @@ Usage:
     okay-dann backup status     replication status and the newest backups
     okay-dann backup now        one immediate sync (when the hub isn't running)
     okay-dann backup restore    restore the hub database from R2
+    okay-dann lab start|stop|status   OWASP Juice Shop on 127.0.0.1:3000 (local rehearsal target)
 
 Backups: once `backup setup` has run, app/dev/web also run `litestream
 replicate` beside the hub, continuously streaming data/endless-illusion.db to
@@ -31,9 +32,16 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import hashlib
+import json
 import os
+import platform
+import re
 import shutil
+import tarfile
 import threading
+import urllib.request
+import zipfile
 import signal
 import subprocess
 import sys
@@ -43,6 +51,11 @@ from pathlib import Path, PurePath
 ROOT = Path(__file__).resolve().parent
 PND = ROOT / "pnd.py"
 UI = ROOT / "ui"
+LAB_DIR = Path.home() / ".local" / "share" / "endless-illusion" / "juice-shop"
+LAB_PORT = 3000
+LAB_HOST = "127.0.0.1"
+LAB_URL = f"http://{LAB_HOST}:{LAB_PORT}/"
+LAB_RELEASES = "https://api.github.com/repos/juice-shop/juice-shop/releases/latest"
 PORTS = {"hub API": 8787, "Vite": 5173}
 DB_PATH = ROOT / "data" / "endless-illusion.db"
 LITESTREAM_CONFIG = ROOT / "litestream.yml"
@@ -59,7 +72,7 @@ BACKUP_FIELDS = [
 LAUNCHER_NAMES = {"okay_dann.py", "okay-dann"}
 PND_NAMES = {"pnd.py"}
 # Control subcommands: never "Endless Illusion running", so never stopped or relaunched.
-CONTROL = {"stop", "restart", "status", "backup"}
+CONTROL = {"stop", "restart", "status", "backup", "lab"}
 # One-shot runs: stoppable, but not something `restart` should relaunch.
 ONE_SHOT = CONTROL | {"test", "chat"}
 
@@ -105,7 +118,18 @@ def classify(argv: list[str], root: Path = ROOT, cwd: str | None = None) -> str 
         return "service"
     if is_litestream(argv, root):
         return "service"
+    if is_lab(argv):
+        return "service"
     return None
+
+
+def is_lab(argv: list[str]) -> bool:
+    """`node <lab dir>/<ver>/juice-shop_*/build/app.js`: the local Juice Shop."""
+    return (
+        len(argv) >= 2
+        and PurePath(argv[0]).name == "node"
+        and any(arg.startswith(str(LAB_DIR) + os.sep) and arg.endswith("app.js") for arg in argv[1:])
+    )
 
 
 def is_litestream(argv: list[str], root: Path = ROOT) -> bool:
@@ -225,6 +249,176 @@ def terminate(pids: list[int], timeout: float = 6.0) -> list[int]:
 
 
 # --- subcommands ---
+
+
+# --- Juice Shop lab (a deliberately vulnerable app the operator owns) ---
+
+# Juice Shop calls server.listen(port) with no host, so it binds every interface,
+# and it has no config option for the bind address. This preload (our own file,
+# loaded with NODE_OPTIONS=--require; Juice Shop's code is untouched) makes any
+# listen() that names no host use 127.0.0.1.
+BIND_SHIM = """\
+'use strict'
+const net = require('net')
+const HOST = process.env.EI_BIND_HOST || '127.0.0.1'
+const orig = net.Server.prototype.listen
+net.Server.prototype.listen = function (...args) {
+  const first = args[0]
+  if (typeof first === 'number' || (typeof first === 'string' && /^[0-9]+$/.test(first))) {
+    if (typeof args[1] !== 'string') args.splice(1, 0, HOST)
+  } else if (first && typeof first === 'object' && first.host === undefined &&
+             first.path === undefined && first.fd === undefined && first.handle === undefined) {
+    args[0] = { ...first, host: HOST }
+  }
+  return orig.apply(this, args)
+}
+"""
+
+
+def lab_release_asset(version: str, node_major: int, machine: str, system: str = "darwin") -> str:
+    """Packaged-release file name, e.g. juice-shop-20.4.0_node26_darwin_arm64.zip
+    (macOS and Windows ship zips, Linux tgz)."""
+    arch = {"x86_64": "x64", "amd64": "x64", "aarch64": "arm64"}.get(machine.lower(), machine.lower())
+    ext = "tgz" if system == "linux" else "zip"
+    return f"juice-shop-{version}_node{node_major}_{system}_{arch}.{ext}"
+
+
+def lab_pick_node_major(asset_names: list[str], local_major: int, machine: str, system: str = "darwin") -> int | None:
+    """Highest Node major with a published package for this OS/arch that is <= the local one."""
+    for major in range(local_major, 0, -1):
+        tail = lab_release_asset("0", major, machine, system).split("0_", 1)[1]
+        if any(name.startswith("juice-shop-") and name.endswith("_" + tail) for name in asset_names):
+            return major
+    return None
+
+
+def lab_app_dir() -> Path | None:
+    """The installed Juice Shop directory (newest version), or None."""
+    found = sorted(LAB_DIR.glob("[0-9]*/juice-shop_*/build/app.js"), key=lambda p: [int(x) for x in re.findall(r"\d+", p.parts[-4])])
+    return found[-1].parent.parent if found else None
+
+
+def node_major() -> int | None:
+    node = shutil.which("node")
+    if not node:
+        return None
+    out = subprocess.run([node, "-v"], capture_output=True, text=True).stdout.strip()
+    m = re.match(r"v(\d+)", out)
+    return int(m.group(1)) if m else None
+
+
+def lab_install() -> Path | None:
+    """Download (into a fresh directory), verify, and extract the packaged release."""
+    local = node_major()
+    if local is None:
+        say("`node` isn't on PATH; Juice Shop needs it.")
+        return None
+    system, machine = platform.system().lower(), platform.machine()
+    say("Looking up the latest Juice Shop release...")
+    request = urllib.request.Request(LAB_RELEASES, headers={"Accept": "application/vnd.github+json"})
+    with urllib.request.urlopen(request, timeout=30) as resp:
+        release = json.load(resp)
+    version = release["tag_name"].lstrip("v")
+    assets = {a["name"]: a for a in release["assets"]}
+    major = lab_pick_node_major(list(assets), local, machine, system)
+    if major is None:
+        say(f"Release {version} has no package for {system}/{machine} with Node <= {local}.")
+        return None
+    if major != local:
+        say(f"WARNING: no Juice Shop package for Node {local}; using the Node {major} build. It may not start.")
+    name = lab_release_asset(version, major, machine, system)
+    asset = assets[name]
+    downloads = LAB_DIR / "downloads" / version
+    if downloads.exists():
+        shutil.rmtree(downloads)  # always a fresh, empty directory
+    downloads.mkdir(parents=True)
+    archive = downloads / name
+    say(f"Downloading {name}...")
+    with urllib.request.urlopen(asset["browser_download_url"], timeout=60) as resp, open(archive, "wb") as out:
+        shutil.copyfileobj(resp, out)
+    expected = (asset.get("digest") or "").removeprefix("sha256:")
+    if expected:
+        actual = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if actual != expected:
+            say(f"SHA-256 mismatch for {name} (expected {expected}, got {actual}); not installing.")
+            return None
+        say(f"SHA-256 verified ({expected[:16]}...).")
+    else:
+        say("WARNING: the release publishes no SHA-256 for this file; installing unverified.")
+    target = LAB_DIR / version
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True)
+    if name.endswith(".zip"):
+        with zipfile.ZipFile(archive) as z:
+            z.extractall(target)  # zipfile drops absolute and `..` member paths
+    else:
+        with tarfile.open(archive) as t:
+            t.extractall(target, filter="data")
+    return lab_app_dir()
+
+
+def lab_listening() -> bool:
+    """Is anything accepting on 127.0.0.1:3000? IPv4 only: another project's dev
+    server on [::1]:3000 doesn't stop Juice Shop binding 127.0.0.1."""
+    import socket
+
+    with socket.socket(socket.AF_INET) as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex((LAB_HOST, LAB_PORT)) == 0
+
+
+def lab_pids() -> list[int]:
+    return [pid for pid, _, argv in find_running() if is_lab(argv)]
+
+
+def cmd_lab_start(args) -> int:
+    if lab_listening():
+        say(f"Something already listens on {LAB_HOST}:{LAB_PORT}; run `okay-dann lab status`.")
+        return 1
+    app = lab_app_dir() or lab_install()
+    if app is None:
+        return 1
+    LAB_DIR.mkdir(parents=True, exist_ok=True)
+    shim = LAB_DIR / "bind-localhost.cjs"
+    shim.write_text(BIND_SHIM, encoding="utf8")
+    env = {k: v for k, v in os.environ.items() if k != "NODE_ENV"}
+    env.update(PORT=str(LAB_PORT), EI_BIND_HOST=LAB_HOST, NODE_OPTIONS=f"--require {shim}")
+    log = LAB_DIR / "juice-shop.log"
+    with open(log, "ab") as logfile:
+        proc = subprocess.Popen(
+            [shutil.which("node"), str(app / "build" / "app.js")],
+            cwd=app, env=env, stdin=subprocess.DEVNULL, stdout=logfile, stderr=subprocess.STDOUT, start_new_session=True,
+        )
+    (LAB_DIR / "juice-shop.pid").write_text(str(proc.pid))
+    say(f"Starting Juice Shop (pid {proc.pid}), log: {log}")
+    deadline = time.time() + 90
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            say(f"Juice Shop exited with code {proc.returncode}; see {log}")
+            return 1
+        if lab_listening():
+            say(f"Juice Shop is up at {LAB_URL} (bound to {LAB_HOST} only).")
+            return 0
+        time.sleep(0.5)
+    say(f"Juice Shop didn't open :{LAB_PORT} within 90s; see {log}")
+    return 1
+
+
+def cmd_lab_stop(args) -> int:
+    pids = lab_pids()
+    if pids:
+        terminate(pids)
+        say(f"Stopped Juice Shop ({pids}).")
+    else:
+        say("Juice Shop isn't running.")
+    (LAB_DIR / "juice-shop.pid").unlink(missing_ok=True)
+    return 0
+
+
+def cmd_lab_status(args) -> int:
+    say(f"Juice Shop: {'up' if lab_listening() and lab_pids() else 'down'}  {LAB_URL}")
+    return 0
 
 
 # --- Litestream (backup to Cloudflare R2) ---
@@ -363,6 +557,7 @@ def cmd_status(args) -> int:
         print(f"  {pid:>7}  {kind:<8}  {' '.join(argv)[:110]}")
     for name, port in PORTS.items():
         print(f"  :{port:<6} {name:<8}  {'in use' if port_in_use(port) else 'free'}")
+    print(f"  :{LAB_PORT:<6} {'Juice Shop':<8}  {'up' if lab_listening() and lab_pids() else 'down'} ({LAB_URL})")
     return 0
 
 
@@ -529,6 +724,12 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--timestamp", help="point in time to restore to, e.g. 2026-11-23T14:00:00Z")
     restore.add_argument("--dry-run", action="store_true", help="print the restore plan only")
     restore.set_defaults(run=cmd_backup_restore)
+
+    lab = sub.add_parser("lab", help="OWASP Juice Shop on 127.0.0.1:3000 (local rehearsal target)")
+    lab_sub = lab.add_subparsers(dest="lab_command", metavar="<action>", required=True)
+    lab_sub.add_parser("start", help="install on first use, then start in the background").set_defaults(run=cmd_lab_start)
+    lab_sub.add_parser("stop", help="stop Juice Shop").set_defaults(run=cmd_lab_stop)
+    lab_sub.add_parser("status", help="up/down and URL").set_defaults(run=cmd_lab_status)
     return parser
 
 
