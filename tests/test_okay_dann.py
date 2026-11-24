@@ -91,3 +91,39 @@ def test_lab_process_classified_as_service():
     assert od.classify(["/opt/homebrew/bin/node", str(lab)], ROOT) == "service"
     assert od.classify(["node", "/elsewhere/build/app.js"], ROOT) is None
     assert od.classify(["vim", str(lab)], ROOT) is None
+
+
+def test_lab_valid_tag():
+    for ok in ("v20.4.0", "20.4.0", "v21"):
+        assert od.lab_valid_tag(ok)
+    for bad in ("../x", "v1/../2", "v1.2.3-rc1", "", None, "v1.2.\n"):
+        assert not od.lab_valid_tag(bad)
+
+
+def test_lab_digest_requires_published_sha256(tmp_path):
+    import hashlib
+
+    f = tmp_path / "a.zip"
+    f.write_bytes(b"data")
+    good = "sha256:" + hashlib.sha256(b"data").hexdigest()
+    assert od.lab_digest_ok(f, {"name": "a.zip", "digest": good})
+    assert not od.lab_digest_ok(f, {"name": "a.zip"})  # no checksum published: refuse
+    assert not od.lab_digest_ok(f, {"name": "a.zip", "digest": None})
+    assert not od.lab_digest_ok(f, {"name": "a.zip", "digest": "sha256:" + "0" * 64})
+
+
+def test_bind_shim_forces_loopback(tmp_path):
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    shim = tmp_path / "shim.cjs"
+    shim.write_text(od.BIND_SHIM)
+    probe = Path(__file__).parent / "bind_shim_probe.js"
+    out = subprocess.run([node, "--require", str(shim), str(probe)], capture_output=True, text=True, timeout=30)
+    assert json.loads(out.stdout) == ["127.0.0.1"] * 5, out.stderr

@@ -261,13 +261,19 @@ BIND_SHIM = """\
 'use strict'
 const net = require('net')
 const HOST = process.env.EI_BIND_HOST || '127.0.0.1'
+const WILDCARDS = new Set(['', '0.0.0.0', '::', '::0', '0:0:0:0:0:0:0:0'])
+const wide = (h) => h === undefined || h === null || (typeof h === 'string' && WILDCARDS.has(h))
 const orig = net.Server.prototype.listen
 net.Server.prototype.listen = function (...args) {
   const first = args[0]
   if (typeof first === 'number' || (typeof first === 'string' && /^[0-9]+$/.test(first))) {
-    if (typeof args[1] !== 'string') args.splice(1, 0, HOST)
-  } else if (first && typeof first === 'object' && first.host === undefined &&
-             first.path === undefined && first.fd === undefined && first.handle === undefined) {
+    if (typeof args[1] === 'string') {
+      if (wide(args[1])) args[1] = HOST
+    } else {
+      args.splice(1, 0, HOST)
+    }
+  } else if (first && typeof first === 'object' && first.path === undefined &&
+             first.fd === undefined && first.handle === undefined && wide(first.host)) {
     args[0] = { ...first, host: HOST }
   }
   return orig.apply(this, args)
@@ -307,8 +313,38 @@ def node_major() -> int | None:
     return int(m.group(1)) if m else None
 
 
+def lab_valid_tag(tag: object) -> bool:
+    """A release tag is used as a directory name, so only accept plain versions."""
+    return isinstance(tag, str) and re.fullmatch(r"v?\d+(\.\d+)*", tag) is not None
+
+
+def lab_digest_ok(archive: Path, asset: dict) -> bool:
+    """True only if the release publishes a SHA-256 for the asset and it matches."""
+    expected = (asset.get("digest") or "").removeprefix("sha256:").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", expected):
+        say(f"no published SHA-256 for {asset.get('name')}; not installing")
+        return False
+    h = hashlib.sha256()
+    with open(archive, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    if h.hexdigest() != expected:
+        say(f"SHA-256 mismatch for {asset.get('name')} (expected {expected}, got {h.hexdigest()}); not installing.")
+        return False
+    say(f"SHA-256 verified ({expected[:16]}...).")
+    return True
+
+
 def lab_install() -> Path | None:
     """Download (into a fresh directory), verify, and extract the packaged release."""
+    try:
+        return _lab_install()
+    except (OSError, KeyError, ValueError, zipfile.BadZipFile, tarfile.TarError) as exc:
+        say(f"Juice Shop install failed: {type(exc).__name__}: {exc}")
+        return None
+
+
+def _lab_install() -> Path | None:
     local = node_major()
     if local is None:
         say("`node` isn't on PATH; Juice Shop needs it.")
@@ -318,7 +354,11 @@ def lab_install() -> Path | None:
     request = urllib.request.Request(LAB_RELEASES, headers={"Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(request, timeout=30) as resp:
         release = json.load(resp)
-    version = release["tag_name"].lstrip("v")
+    tag = release["tag_name"]
+    if not lab_valid_tag(tag):
+        say(f"Unexpected release tag {tag!r}; not installing.")
+        return None
+    version = tag.lstrip("v")
     assets = {a["name"]: a for a in release["assets"]}
     major = lab_pick_node_major(list(assets), local, machine, system)
     if major is None:
@@ -336,25 +376,26 @@ def lab_install() -> Path | None:
     say(f"Downloading {name}...")
     with urllib.request.urlopen(asset["browser_download_url"], timeout=60) as resp, open(archive, "wb") as out:
         shutil.copyfileobj(resp, out)
-    expected = (asset.get("digest") or "").removeprefix("sha256:")
-    if expected:
-        actual = hashlib.sha256(archive.read_bytes()).hexdigest()
-        if actual != expected:
-            say(f"SHA-256 mismatch for {name} (expected {expected}, got {actual}); not installing.")
-            return None
-        say(f"SHA-256 verified ({expected[:16]}...).")
-    else:
-        say("WARNING: the release publishes no SHA-256 for this file; installing unverified.")
+    if not lab_digest_ok(archive, asset):
+        return None
     target = LAB_DIR / version
-    if target.exists():
-        shutil.rmtree(target)
-    target.mkdir(parents=True)
-    if name.endswith(".zip"):
-        with zipfile.ZipFile(archive) as z:
-            z.extractall(target)  # zipfile drops absolute and `..` member paths
-    else:
-        with tarfile.open(archive) as t:
-            t.extractall(target, filter="data")
+    staging = LAB_DIR / f".staging-{version}"
+    if staging.exists():
+        shutil.rmtree(staging)
+    staging.mkdir(parents=True)
+    try:
+        if name.endswith(".zip"):
+            with zipfile.ZipFile(archive) as z:
+                z.extractall(staging)  # zipfile drops absolute and `..` member paths
+        else:
+            with tarfile.open(archive) as t:
+                t.extractall(staging, filter="data")
+        if target.exists():
+            shutil.rmtree(target)
+        staging.rename(target)
+    except BaseException:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
     return lab_app_dir()
 
 
@@ -372,9 +413,21 @@ def lab_pids() -> list[int]:
     return [pid for pid, _, argv in find_running() if is_lab(argv)]
 
 
+def lab_bad_sockets(pid: int) -> list[str]:
+    """Listening sockets of `pid` that are not 127.0.0.1:<LAB_PORT> (lsof -Fn names)."""
+    out = subprocess.run(
+        ["lsof", "-nP", f"-iTCP:{LAB_PORT}", "-sTCP:LISTEN", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True
+    ).stdout
+    names = [line[1:] for line in out.splitlines() if line.startswith("n")]
+    return [n for n in names if n != f"{LAB_HOST}:{LAB_PORT}"]
+
+
 def cmd_lab_start(args) -> int:
+    if lab_pids() and lab_listening():
+        say(f"Juice Shop is already up at {LAB_URL}.")
+        return 0
     if lab_listening():
-        say(f"Something already listens on {LAB_HOST}:{LAB_PORT}; run `okay-dann lab status`.")
+        say(f"Something else already listens on {LAB_HOST}:{LAB_PORT}; not starting.")
         return 1
     app = lab_app_dir() or lab_install()
     if app is None:
@@ -383,14 +436,14 @@ def cmd_lab_start(args) -> int:
     shim = LAB_DIR / "bind-localhost.cjs"
     shim.write_text(BIND_SHIM, encoding="utf8")
     env = {k: v for k, v in os.environ.items() if k != "NODE_ENV"}
-    env.update(PORT=str(LAB_PORT), EI_BIND_HOST=LAB_HOST, NODE_OPTIONS=f"--require {shim}")
+    node_options = f"{env['NODE_OPTIONS']} " if env.get("NODE_OPTIONS") else ""
+    env.update(PORT=str(LAB_PORT), EI_BIND_HOST=LAB_HOST, NODE_OPTIONS=f'{node_options}--require "{shim}"')
     log = LAB_DIR / "juice-shop.log"
     with open(log, "ab") as logfile:
         proc = subprocess.Popen(
             [shutil.which("node"), str(app / "build" / "app.js")],
             cwd=app, env=env, stdin=subprocess.DEVNULL, stdout=logfile, stderr=subprocess.STDOUT, start_new_session=True,
         )
-    (LAB_DIR / "juice-shop.pid").write_text(str(proc.pid))
     say(f"Starting Juice Shop (pid {proc.pid}), log: {log}")
     deadline = time.time() + 90
     while time.time() < deadline:
@@ -398,10 +451,16 @@ def cmd_lab_start(args) -> int:
             say(f"Juice Shop exited with code {proc.returncode}; see {log}")
             return 1
         if lab_listening():
+            bad = lab_bad_sockets(proc.pid)
+            if bad:
+                terminate([proc.pid])
+                say(f"Juice Shop listened on {bad}, not {LAB_HOST} only; stopped it.")
+                return 1
             say(f"Juice Shop is up at {LAB_URL} (bound to {LAB_HOST} only).")
             return 0
         time.sleep(0.5)
-    say(f"Juice Shop didn't open :{LAB_PORT} within 90s; see {log}")
+    terminate([proc.pid])
+    say(f"Juice Shop didn't open :{LAB_PORT} within 90s; stopped it. See {log}")
     return 1
 
 
@@ -412,7 +471,6 @@ def cmd_lab_stop(args) -> int:
         say(f"Stopped Juice Shop ({pids}).")
     else:
         say("Juice Shop isn't running.")
-    (LAB_DIR / "juice-shop.pid").unlink(missing_ok=True)
     return 0
 
 
