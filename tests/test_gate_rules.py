@@ -405,3 +405,45 @@ def test_input_file_flags_with_workdir_path_not_in(wd):
         assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), cmd
     hosts, indirect = extract_hosts(f"curl -o {wd}/x in.scope.com", workdir=wd)
     assert scope_verdict(hosts, indirect, IN) == "in"
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "curl -x \"intranet\":3128 in.scope.com",
+        "curl -x 'intranet':3128 in.scope.com",
+        "curl -x intranet\\:3128 in.scope.com",
+        "curl in.scope.com 'evil'.com",
+        "curl in.scope.com \"evil\".com",
+        "curl in.scope.com evil\\.com",
+        "curl in.scope.com evil'.'com",
+        "ssh -J 'jump':22 in.scope.com",
+        "ssh -J \"evil\".com in.scope.com",
+        "\"curl\" -x 'intranet':1 in.scope.com",
+        "curl \"in.scope.com\"@'evil'.com",
+        "curl in.scope.com /'/'evil",
+        "curl in.scope.com '/'/evil",
+    ],
+)
+def test_quoted_words_cannot_hide_hosts(cmd):
+    hosts, indirect = extract_hosts(cmd)
+    assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), (cmd, hosts, indirect)
+
+
+def test_dequoted_hosts_are_collected():
+    hosts, _ = extract_hosts("curl in.scope.com 'evil'.com")
+    assert "evil.com" in hosts
+
+
+def test_quoted_head_and_method_ok():
+    assert extract_hosts("'curl' -X 'POST' in.scope.com") == (["in.scope.com"], False)
+    assert extract_hosts("curl in.scope.com", workdir=None)[1] is False
+
+
+def test_output_flag_per_program(wd):
+    ok = lambda c: scope_verdict(*extract_hosts(c, workdir=wd), IN) == "in"
+    assert ok(f"curl -o {wd}/x in.scope.com")
+    assert ok(f"wget -O {wd}/x in.scope.com")
+    assert not ok(f"ssh -o {wd}/x in.scope.com")
+    assert not ok(f"wget -o {wd}/x in.scope.com")
+    assert not ok(f"curl -O {wd}/x in.scope.com")

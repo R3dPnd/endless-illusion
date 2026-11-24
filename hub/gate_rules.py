@@ -133,7 +133,9 @@ _BOOL_CLUSTER = frozenset("sSikLvfIqnN46")
 _SHORT_METHOD = frozenset("X")
 _SHORT_NUM = frozenset("mpPr")
 _SHORT_VALUE = frozenset("xJKioOdHeAbcuTF")
-_SHORT_OUT = frozenset("oO")  # only output-file flags may take a workdir path (others read it as input)
+# only output-file flags may take a workdir path (others read it as input); per program
+_OUT_SHORT = {"curl": "o", "wget": "O"}
+_OUT_LONG = {"curl": "--output", "wget": "--output-document"}
 _LONG_METHOD = frozenset({"--request"})
 _LONG_NUM = frozenset({"--max-time", "--connect-timeout", "--retry", "--limit-rate", "--max-redirs"})
 _LONG_VALUE = frozenset(
@@ -141,7 +143,6 @@ _LONG_VALUE = frozenset(
     --user --upload-file --form --proxy-user --config --interface --dns-servers --doh-url --socks5
     --socks5-hostname --preproxy --json --url --data-raw --data-binary --data-urlencode""".split()
 )
-_LONG_OUT = frozenset({"--output"})
 _LONG_FLAG_RE = re.compile(r"^--[A-Za-z][A-Za-z0-9\-]*$")
 _METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
 _NUM_RE = re.compile(r"^\d{1,6}$")
@@ -173,7 +174,7 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
     (or an absolute path inside workdir).  Integers and upper-case words are
     accepted only as the value of a known numeric / method flag."""
     try:
-        toks = _tokenize(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
+        toks = _tokenize_full(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
     except _Unparseable:
         return True
     at_head = True
@@ -188,11 +189,15 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
             return bool(_NUM_RE.match(val))
         return _recognized_value(val, workdir, paths_ok=(kind == "out"))
 
-    for kind, val in toks:
+    for kind, val, raw in toks:
         if kind == "op":
             at_head = val in _SPLIT_OPS
             expect = None
             continue
+        # A word whose dequoted text differs from its raw text could hide a host from
+        # the raw-text scan.  Exempt: the program head, quoted -X methods, local-command patterns.
+        if raw != val and not at_head and expect != "method" and head not in LOCAL_COMMANDS:
+            return True
         if at_head:
             at_head = False
             head = val
@@ -213,7 +218,7 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
                 return True
             kind_ = (
                 "method" if name in _LONG_METHOD else "num" if name in _LONG_NUM
-                else "out" if name in _LONG_OUT else "value"
+                else "out" if _OUT_LONG.get(head) == name else "value"
             )
             if eq:
                 if not check(kind_, value):
@@ -222,7 +227,7 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
                 expect = "method"
             elif name in _LONG_NUM:
                 expect = "num"
-            elif name in _LONG_OUT:
+            elif _OUT_LONG.get(head) == name:
                 expect = "out"
             elif name in _LONG_VALUE:
                 expect = "value"
@@ -234,8 +239,10 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
                     expect = "method"
                 elif letters in _SHORT_NUM:
                     expect = "num"
-                elif letters in _SHORT_OUT:
+                elif _OUT_SHORT.get(head) == letters:
                     expect = "out"
+                elif head == "curl" and letters == "O":
+                    pass  # curl -O takes no value
                 elif letters in _SHORT_VALUE:
                     expect = "value"
                 continue
@@ -261,8 +268,11 @@ def extract_hosts(
     `indirect` is True when the text can build or hide a host: any `$`,
     backticks, `eval`, `base64`/`xxd`, hex escapes, brace expansion, any
     non-ASCII character, an unparseable command line, and (with `strict`) any
-    non-head word that is not a flag, a host-bearing word, an upper-case method,
-    a small integer or an absolute path inside `workdir`.  A verdict on such
+    segment head that is not a known program, any word whose dequoted text differs
+    from its raw text, any non-head word that is not exactly one host/URL (or a
+    known-safe flag), and any flag value other than a host/URL, an upper-case
+    method after `-X`/`--request`, a number after a known numeric flag, or an
+    absolute `workdir` path as an output-file value.  A verdict on such
     text can never be trusted ("unknown").  Over-triggering is intentional.
 
     `file_like=False` ignores bare-domain matches whose TLD doubles as a common
@@ -274,6 +284,15 @@ def extract_hosts(
     indirect = bool(_INDIRECT_RE.search(text))
     if strict and not indirect:
         indirect = _unclassified_words(text, workdir)
+        try:  # hosts seen in dequoted words must also be reported (raw/dequoted views never disagree)
+            toks = _tokenize(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
+        except _Unparseable:
+            toks = []
+        for kind, val in toks:
+            if kind == "word":
+                for h in _scan_hosts(val, file_like):
+                    if h not in hosts:
+                        hosts.append(h)
     return hosts, indirect
 
 
@@ -398,10 +417,11 @@ class _Unparseable(Exception):
     pass
 
 
-def _tokenize(cmd: str, glob_ok: bool = False) -> list[tuple[str, str]]:
+def _tokenize_full(cmd: str, glob_ok: bool = False) -> list[tuple[str, str, str]]:
     """Minimal POSIX-ish tokenizer -> [("word"|"op", text)].  Raises on anything odd,
     including (unless glob_ok) any unquoted glob char: globs can inject options."""
-    toks: list[tuple[str, str]] = []
+    toks: list[tuple[str, str, str]] = []
+    wstart = 0
     i, n = 0, len(cmd)
     cur: list[str] = []
     have = False
@@ -409,26 +429,29 @@ def _tokenize(cmd: str, glob_ok: bool = False) -> list[tuple[str, str]]:
         c = cmd[i]
         if c in " \t":
             if have:
-                toks.append(("word", "".join(cur)))
+                toks.append(("word", "".join(cur), cmd[wstart:i]))
                 cur, have = [], False
             i += 1
         elif c in _OP_CHARS:
             if have:
-                toks.append(("word", "".join(cur)))
+                toks.append(("word", "".join(cur), cmd[wstart:i]))
                 cur, have = [], False
             j = i
             while j < n and cmd[j] in _OP_CHARS:
                 j += 1
-            toks.append(("op", cmd[i:j]))
+            toks.append(("op", cmd[i:j], cmd[i:j]))
             i = j
         elif c == "'":
             end = cmd.find("'", i + 1)
             if end < 0:
                 raise _Unparseable("unterminated '")
             cur.append(cmd[i + 1 : end])
+            if not have:
+                wstart = i
             have = True
             i = end + 1
         elif c == '"':
+            qs = i
             i += 1
             while True:
                 if i >= n:
@@ -446,22 +469,32 @@ def _tokenize(cmd: str, glob_ok: bool = False) -> list[tuple[str, str]]:
                 else:
                     cur.append(d)
                     i += 1
+            if not have:
+                wstart = qs
             have = True
         elif c == "\\":
             if i + 1 >= n:
                 raise _Unparseable("dangling backslash")
             cur.append(cmd[i + 1])
+            if not have:
+                wstart = i
             have = True
             i += 2
         else:
             if c in "*?[" and not glob_ok:
                 raise _Unparseable("unquoted glob")
             cur.append(c)
+            if not have:
+                wstart = i
             have = True
             i += 1
     if have:
-        toks.append(("word", "".join(cur)))
+        toks.append(("word", "".join(cur), cmd[wstart:i]))
     return toks
+
+
+def _tokenize(cmd: str, glob_ok: bool = False) -> list[tuple[str, str]]:
+    return [(k, v) for k, v, _ in _tokenize_full(cmd, glob_ok)]
 
 
 def _parse_opts(args, short_ok, short_val, long_ok, long_val):
