@@ -27,6 +27,7 @@ from .db.bounties import (
     track_lead,
 )
 from .db.read import current, parse_json
+from .gate_service import expire_orphaned
 from .policies import load_policies
 from .runner import Runner
 
@@ -134,6 +135,9 @@ class Hub:
         interrupted = mark_interrupted(self.db)
         if interrupted:
             print(f"[archive] marked {interrupted} unfinished run(s) interrupted")
+        expired = expire_orphaned(self.db, set())  # no run is live yet: nothing can still be waiting
+        if expired:
+            print(f"[gate] expired {expired} orphaned pending action(s)")
         self.runner = Runner(self.db, self.db_file, self.data_dir, claude_cmd, self.repo_root)
 
         db = self.db

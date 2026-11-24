@@ -12,13 +12,17 @@ from pathlib import Path
 
 from .db.archive import add_report, append_event, create_run, find_session_id, finish_run, get_run
 from .db.ownership import AGENTS, OWNERSHIP
+from .db.pipeline import add_stage, set_stage_status
+from .gate_service import GATED_TOOLS, cancel_for_run
 from .policies import get_policy, load_policies
 from .prompt import build_followup_prompt, build_prompt
 from .report import DELEGATE_TOOLS, HANDBACK_TOOLS, clean_report, result_text
-from .session import build_session_args, load_shared_server, write_mcp_config
-from .tool_names import SHARED_READ_TOOLS, qualified_tools_for
+from .session import build_session_args, load_shared_server, write_gate_settings, write_mcp_config
+from .tool_names import DECLARE_TOOL, PERMISSION_TOOL, SHARED_READ_TOOLS, qualified_tools_for
 
 ORCHESTRATOR = "dann-of-thursday"
+# Final stage status for a finished run's status.
+STAGE_STATUS = {"done": "done", "error": "failed", "stopped": "stopped"}
 WINDOWS = os.name == "nt"
 
 
@@ -164,8 +168,17 @@ class Runner:
             raise ValueError("that run has no claude session to continue")
         return {**stored, "session_id": session_id}
 
-    def start(self, body, link=None):
-        """link: {programId, snapshotId} resolved by the server from a confirmed snapshot — never taken from the request."""
+    def start(self, body, link=None, stage=None):
+        """
+        link: {programId, snapshotId} resolved by the server from a confirmed snapshot — never taken from the request.
+
+        stage: {engagementId, stageId, stage, armed, tools, mcpAgents, fork} for a run that belongs to
+        an engagement stage (set by the hub, never by the request). A stage run goes through the ei-gate:
+        a PreToolUse hook (--settings, no other setting sources), the gate MCP server, the permission-prompt
+        tool as a backstop, a pinned permission mode, and every gated tool left out of --allowedTools.
+        `tools`/`mcpAgents`, when given, replace the policy toolset and memory agents. The caller creates the
+        ops_stages row (`stageId`); this records the run id on it and mirrors the run's final status.
+        """
         link = link or {}
         parent = self.resumable(body["continueRun"]) if body.get("continueRun") is not None else None
         task = body.get("task")
@@ -191,6 +204,9 @@ class Runner:
             tools, active_engaged = parent["tools"], parent["active_engaged"]
         else:
             tools, active_engaged = resolve_tools(self.agents_dir, orchestrated, bool(body.get("enableActive")), authorization, policy)
+        if stage and stage.get("tools") is not None:
+            tools = list(stage["tools"])
+            active_engaged = bool(stage.get("armed"))
 
         # Every run carries the RoE. Direct runs also carry the agent's dossier,
         # as the subagent would; Dann gets his definition from --agent, which
@@ -210,17 +226,33 @@ class Runner:
 
         run_id = str(uuid.uuid4())
         memory_agents = AGENTS if orchestrated else ([agent] if agent in OWNERSHIP else [])
+        if stage and stage.get("mcpAgents") is not None:
+            memory_agents = [a for a in stage["mcpAgents"] if a in OWNERSHIP]
         shared = load_shared_server(self.repo_root)
-        mcp_config = (
-            write_mcp_config(self.data_dir / "run-configs", run_id, memory_agents, self.db_file, shared) if memory_agents or shared else None
-        )
+        configs = self.data_dir / "run-configs"
+        mcp_tools = [t for a in memory_agents for t in qualified_tools_for(a)] + (SHARED_READ_TOOLS if shared else [])
+        if stage:
+            mcp_config = write_mcp_config(configs, run_id, memory_agents, self.db_file, shared, gate=True, repo_root=self.repo_root)
+            gate_args = {
+                "unapproved": GATED_TOOLS,
+                "settings_path": write_gate_settings(configs, run_id, self.db_file, self.repo_root),
+                "setting_sources": "",  # no user/project/local settings: nothing can disable or override the hook
+                "permission_mode": "default",
+                "permission_tool": PERMISSION_TOOL,
+                "fork": bool(stage.get("fork")) and bool(parent),
+            }
+            mcp_tools.append(DECLARE_TOOL)
+        else:
+            mcp_config = write_mcp_config(configs, run_id, memory_agents, self.db_file, shared) if memory_agents or shared else None
+            gate_args = {}
         args = build_session_args(
             tools,
             mcp_config_path=mcp_config,
-            mcp_tools=[t for a in memory_agents for t in qualified_tools_for(a)] + (SHARED_READ_TOOLS if shared else []),
+            mcp_tools=mcp_tools,
             agent_def=ORCHESTRATOR if orchestrated else None,
             system_prompt=system_prompt,
             resume=parent["session_id"] if parent else None,
+            **gate_args,
         )
 
         run = Run(
@@ -232,6 +264,7 @@ class Runner:
             programId=link.get("programId"),
             snapshotId=link.get("snapshotId"),
             parentRunId=parent["id"] if parent else None,
+            stageId=None,
             finished=False,
         )
         self.live[run_id] = run
@@ -268,6 +301,18 @@ class Runner:
                 },
             ),
         )
+        if stage:
+            # The gate finds the run's engagement through this row: with no row, every gated call is denied.
+            def record_stage():
+                if stage.get("stageId") is not None:
+                    _, changed = self.db.run("UPDATE ops_stages SET run_id = ?, status = 'running' WHERE id = ?", run_id, stage["stageId"])
+                    if not changed:
+                        raise ValueError(f"no stage {stage['stageId']}; the gate will deny every gated call")
+                    run.stageId = stage["stageId"]
+                else:
+                    run.stageId = add_stage(self.db, stage["engagementId"], stage["stage"], run_id, stage.get("armed"))
+
+            archive("stage", record_stage)
         push(
             {
                 "kind": "meta",
@@ -326,6 +371,8 @@ class Runner:
                 "finish",
                 lambda: finish_run(self.db, run_id, run.status, result.get("total_cost_usd"), result.get("duration_ms")),
             )
+            if run.stageId is not None:
+                archive("stage", lambda: set_stage_status(self.db, run.stageId, STAGE_STATUS.get(run.status, "failed")))
             run.close()
 
         prompt = build_followup_prompt(task) if parent else build_prompt(agent, task, scope, authorization, orchestrated)
@@ -336,6 +383,7 @@ class Runner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env={**os.environ, "EI_RUN_ID": run_id} if stage else None,  # the gate hook inherits it
                 creationflags=subprocess.CREATE_NO_WINDOW if WINDOWS else 0,
             )
         except OSError as err:
@@ -394,6 +442,10 @@ class Runner:
         if run.proc and run.status == "running":
             run.status = "stopped"
             kill_tree(run.proc)
+        try:
+            cancel_for_run(self.db, run_id)  # its waiting gate calls get deny
+        except Exception as err:
+            print(f"[gate] cancel {run_id}: {err}", file=sys.stderr)
         return run
 
     def stop_all(self):
