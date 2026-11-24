@@ -354,7 +354,7 @@ git commit -m "docs(spec): record permission-prompt-tool and fork-session verifi
   - `test_explain_cached_per_technique`
   - `test_ask_fork_has_no_gated_tools`
 - [ ] **Step 2:** Run `.venv/bin/python -m pytest tests/test_pipeline.py -q`. Expected: FAIL.
-- [ ] **Step 3:** Implement. Add the agent-definition sections and the Sen policy change, then run `python -m hub.sync_agent_tools`.
+- [ ] **Step 3:** Implement. Add the agent-definition sections, then run `python -m hub.sync_agent_tools`.
 - [ ] **Step 4:** Run `.venv/bin/python -m pytest -q`. Expected: all pass.
 - [ ] **Step 5: Commit** with `feat(pipeline): stage state machine, prompts, ask and explain`.
 
