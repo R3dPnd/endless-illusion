@@ -146,4 +146,11 @@ WRITE_TABLES = {
         "description": "Link a run to an engagement.",
         "columns": {"linked_run_id": TEXT, "engagement_id": {"type": "int"}},
     },
+    "plan_drafts": {
+        "tool": "save_plan_draft",
+        "description": "Save a draft engagement plan for the operator to review and approve. "
+        'Shape of plan: {"stages": {"web"|"api"|"analysis"|"reporting": {"include": bool, "targets": [str], "focus": str}}, '
+        '"research": [str]}. Saving again supersedes the earlier draft. A plan is a proposal and never authorizes testing.',
+        "columns": {"engagement_id": {"type": "int"}, "summary": {"type": "text", "optional": True}, "plan": {"type": "json"}},
+    },
 }
