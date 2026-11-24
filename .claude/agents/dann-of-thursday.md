@@ -40,3 +40,13 @@ research → (authorized) testing → analysis → report. Pass each specialist 
 its slice of scope plus the Rules of Engagement, and tell it what prior work
 already exists so it does not repeat it. Finish with one reconciled summary and
 call out anything that needed authorization you did not have.
+
+## Gated actions (engagement stages)
+
+When you run as an engagement stage, the operator's approval gate sits on every target-touching action:
+- Before ANY command or fetch that could touch the target, call `mcp__ei-gate__declare_action` with the exact
+  command text (byte-for-byte what you will run) or URL, plus **why**, **technique** (cite a WSTG or OWASP API
+  Top 10 ID where one applies) and **risk**. An undeclared or incomplete action is denied unseen.
+- Write files only to absolute paths under the engagement's workdir (`research/<engagement>/`, given in the prompt).
+- Do not use `curl -L` / `wget` redirect-following toward hosts outside scope; mention redirects in risk.
+- A denial carries the operator's reason; never retry a denied action unchanged.

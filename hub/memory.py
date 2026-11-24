@@ -56,8 +56,8 @@ def schema_for(spec):
     return dict(base)
 
 
-def build_tools(db, agent, run_id):
-    """name -> (description, input schema, handler(args) -> result)."""
+def build_tools(db, agent, run_id, read_only=False):
+    """name -> (description, input schema, handler(args) -> result). `read_only` leaves out the write tools."""
     tools = {
         "find_prior_work": (
             "Everything already recorded about a host, domain, product, or URL fragment: assets, findings, endpoints, "
@@ -93,7 +93,7 @@ def build_tools(db, agent, run_id):
         ),
     }
 
-    for table in OWNERSHIP[agent]:
+    for table in [] if read_only else OWNERSHIP[agent]:
         definition = WRITE_TABLES[table]
         cols = definition["columns"]
         props = {col: schema_for(spec) for col, spec in cols.items()}
@@ -121,11 +121,11 @@ def main():
 
     agent, db_file = arg("agent"), arg("db")
     if agent not in OWNERSHIP or not db_file:
-        print("usage: memory.py --agent <known agent id> --db <file>", file=sys.stderr)
+        print("usage: memory.py --agent <known agent id> --db <file> [--read-only]", file=sys.stderr)
         sys.exit(1)
 
     db = open_db(db_file)
-    tools = build_tools(db, agent, os.environ.get("EI_RUN_ID") or None)
+    tools = build_tools(db, agent, os.environ.get("EI_RUN_ID") or None, read_only="--read-only" in argv)
     schemas = {n: {"description": d, "inputSchema": sch} for n, (d, sch, _) in tools.items()}
     serve(schemas, lambda name, args: tools[name][2](args), f"ei-memory:{agent}")
 

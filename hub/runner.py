@@ -11,16 +11,18 @@ import uuid
 from pathlib import Path
 
 from .db.archive import add_report, append_event, create_run, find_session_id, finish_run, get_run
-from .db.ownership import AGENTS, OWNERSHIP
+from .db.ownership import AGENTS, OWNERSHIP, server_name
 from .db.pipeline import add_stage, set_stage_status
 from .gate_service import GATED_TOOLS, cancel_for_run
 from .policies import get_policy, load_policies
 from .prompt import build_followup_prompt, build_prompt
 from .report import DELEGATE_TOOLS, HANDBACK_TOOLS, clean_report, result_text
 from .session import build_session_args, load_shared_server, write_gate_settings, write_mcp_config
-from .tool_names import DECLARE_TOOL, PERMISSION_TOOL, SHARED_READ_TOOLS, qualified_tools_for
+from .tool_names import DECLARE_TOOL, PERMISSION_TOOL, SHARED_READ_TOOLS, qualified_tools_for, tool_names_for
 
 ORCHESTRATOR = "dann-of-thursday"
+# An Ask/explain fork can only read: never a gated tool, never Agent.
+FORK_TOOLS = ("Read", "Grep", "Glob")
 # Final stage status for a finished run's status.
 STAGE_STATUS = {"done": "done", "error": "failed", "stopped": "stopped"}
 WINDOWS = os.name == "nt"
@@ -178,6 +180,8 @@ class Runner:
         tool as a backstop, a pinned permission mode, and every gated tool left out of --allowedTools.
         `tools`/`mcpAgents`, when given, replace the policy toolset and memory agents. The caller creates the
         ops_stages row (`stageId`); this records the run id on it and mirrors the run's final status.
+        A fresh stage run's `task` is the complete prompt (hub/pipeline.py builds it) and is sent as-is; a
+        stage run of Dann is never orchestrated (no --agent, no Agent tool).
         """
         link = link or {}
         parent = self.resumable(body["continueRun"]) if body.get("continueRun") is not None else None
@@ -201,7 +205,8 @@ class Runner:
         if not policy:
             raise ValueError(f"unknown agent: {agent}")
 
-        orchestrated = agent == ORCHESTRATOR
+        # A stage run of Dann (Planning) is a plain run: no --agent, no Agent tool, no subagents.
+        orchestrated = agent == ORCHESTRATOR and not stage
         if parent:
             # Same toolset as the run being continued: a reply can neither arm nor widen active tooling.
             tools, active_engaged = parent["tools"], parent["active_engaged"]
@@ -287,6 +292,66 @@ class Runner:
             stageId=stage_id,
             finished=False,
         )
+        if parent:
+            prompt = build_followup_prompt(task)
+        elif stage:
+            prompt = task  # the pipeline builds the whole stage prompt (hub/prompt.py build_stage_prompt)
+        else:
+            prompt = build_prompt(agent, task, scope, authorization, orchestrated)
+        record = {"task": task, "scope": scope, "authorization": authorization}
+        return self._launch(run, record, args, prompt, env={**os.environ, "EI_RUN_ID": run_id} if stage else None)
+
+    def fork(self, parent_run_id, task, tools=FORK_TOOLS, on_finish=None):
+        """
+        Answer a side question from a fork of a run's claude session (`--resume <session> --fork-session`).
+        Allowed while the parent is still running: the parent and any pending gated action are untouched.
+        The fork has no gate and no ops_stages row, so it gets only non-gated `tools` (never Agent), the
+        parent agent's memory server started read-only, and the shared notes. `on_finish(run)` is called
+        once the fork has finished and been archived.
+        """
+        tools = list(tools)
+        bad = sorted((set(tools) & GATED_TOOLS) | ({"Agent"} & set(tools)))
+        if bad:
+            raise ValueError(f"a fork cannot have {', '.join(bad)}")
+        if not isinstance(task, str) or not task.strip():
+            raise ValueError("a fork needs a question")
+        stored = get_run(self.db, parent_run_id) if isinstance(parent_run_id, str) else None
+        if not stored:
+            raise ValueError("no such run to fork")
+        live = self.live.get(parent_run_id)
+        session_id = (live.session_id if live else None) or find_session_id(self.db, parent_run_id)
+        if not session_id:
+            raise ValueError("that run has no claude session to fork")
+        agent = stored["agent"]
+        run_id = str(uuid.uuid4())
+        memory_agents = [agent] if agent in OWNERSHIP else []
+        shared = load_shared_server(self.repo_root)
+        mcp_config = (
+            write_mcp_config(self.data_dir / "run-configs", run_id, memory_agents, self.db_file, shared, read_only=True)
+            if memory_agents or shared
+            else None
+        )
+        mcp_tools = [f"mcp__{server_name(a)}__{t}" for a in memory_agents for t in tool_names_for(a)["read"]]
+        mcp_tools += SHARED_READ_TOOLS if shared else []
+        args = build_session_args(tools, mcp_config_path=mcp_config, mcp_tools=mcp_tools, resume=session_id, fork=True)
+        run = Run(
+            id=run_id,
+            agent=agent,
+            orchestrated=False,
+            activeEngaged=False,
+            tools=tools,
+            programId=stored["program_id"],
+            snapshotId=stored["snapshot_id"],
+            parentRunId=parent_run_id,
+            stageId=None,
+            finished=False,
+        )
+        record = {"task": task, "scope": stored["scope"], "authorization": stored["authorization"]}
+        return self._launch(run, record, args, task, env=None, on_finish=on_finish)
+
+    def _launch(self, run, record, args, prompt, env, on_finish=None):
+        """Archive the run, spawn claude with `args`, feed it `prompt`, and stream and archive its events."""
+        run_id, agent = run.id, run.agent
         self.live[run_id] = run
         seq = [0]
 
@@ -310,11 +375,11 @@ class Runner:
                 {
                     "id": run_id,
                     "agent": agent,
-                    "task": task,
-                    "scope": scope,
-                    "authorization": authorization,
-                    "activeEngaged": active_engaged,
-                    "tools": tools,
+                    "task": record["task"],
+                    "scope": record["scope"],
+                    "authorization": record["authorization"],
+                    "activeEngaged": run.activeEngaged,
+                    "tools": run.tools,
                     "programId": run.programId,
                     "snapshotId": run.snapshotId,
                     "parentRunId": run.parentRunId,
@@ -325,9 +390,9 @@ class Runner:
             {
                 "kind": "meta",
                 "agent": agent,
-                "orchestrated": orchestrated,
-                "activeEngaged": active_engaged,
-                "tools": tools,
+                "orchestrated": run.orchestrated,
+                "activeEngaged": run.activeEngaged,
+                "tools": run.tools,
                 "parentRunId": run.parentRunId,
                 "ts": now_ms(),
             }
@@ -381,9 +446,10 @@ class Runner:
             )
             if run.stageId is not None:
                 archive("stage", lambda: set_stage_status(self.db, run.stageId, STAGE_STATUS.get(run.status, "failed")))
+            if on_finish:
+                archive("on_finish", lambda: on_finish(run))
             run.close()
 
-        prompt = build_followup_prompt(task) if parent else build_prompt(agent, task, scope, authorization, orchestrated)
         try:
             proc = subprocess.Popen(
                 resolve_command(self.claude_cmd) + args,
@@ -391,7 +457,7 @@ class Runner:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                env={**os.environ, "EI_RUN_ID": run_id} if stage else None,  # the gate hook inherits it
+                env=env,  # stage runs pass EI_RUN_ID, which the gate hook inherits
                 creationflags=subprocess.CREATE_NO_WINDOW if WINDOWS else 0,
             )
         except OSError as err:
