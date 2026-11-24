@@ -100,7 +100,9 @@ idle or paused at a gate, answering from a fork taken at the pause.
 **Verification results (Task 1)** — Claude Code 2.1.331, real `claude -p --model haiku` runs
 against a stdio MCP spike server exposing one tool, `permission`:
 
-- **Mechanism: `--permission-prompt-tool mcp__<server>__<tool>` works; no hook fallback needed.**
+- **Mechanism: `--permission-prompt-tool mcp__<server>__<tool>` works, but "no hook fallback
+  needed" is superseded: see "Follow-up" and "Fix round 1" below. The `PreToolUse` hook is the
+  primary gate, because the permission tool alone misses auto-allowed calls.**
   `--permission-prompts host` is the default and is not required (the flag can be omitted; with
   `host` but no tool, un-allowed tools are just refused and the agent is told to ask the user).
 - **Which calls reach the tool:** only calls that would otherwise prompt. Read-only Bash such as
@@ -160,8 +162,52 @@ against a stdio MCP spike server exposing one tool, `permission`:
   return `"ask"` and keep `--permission-prompt-tool` too is workable but redundant; if both are
   used, the hook must return `ask` for every call, otherwise auto-allowed ones skip the tool.
   Do not rely on `--permission-prompt-tool` alone.
+- **Hook reply channel:** JSON on stdout with exit 0 (the shapes above), or exit 2 with the
+  reason on stderr. Nothing else is a decision (see failure modes).
+- **Scope of these results:** all behaviour here is for Claude Code 2.1.331 and is
+  version-sensitive; re-run these checks on every Claude Code upgrade. `--settings` merges
+  with project/user settings; it is unverified whether project settings can disable or
+  override the hook.
 - Test caveat: `--mcp-config` pointing at a missing server script makes the permission tool
   error with "not found. Available MCP tools: none"; check `mcp_servers[].status` in the init event.
+
+**Fix round 1: hook failure modes, precedence, modes (verified, `echo hi`, haiku, 2.1.331)**
+
+- **Failure modes: almost everything fails OPEN.** With `echo hi` (otherwise auto-allowed):
+
+  | Hook behaviour | Result |
+  |---|---|
+  | exit 1 (stderr text) | call RUNS (fail open) |
+  | exit 2 (reason on stderr) | call BLOCKED; agent gets `PreToolUse:Bash hook error: [cmd]: <stderr>` |
+  | invalid JSON on stdout, exit 0 | call RUNS (fail open) |
+  | no output, exit 0 | call RUNS (fail open) |
+  | uncaught Python exception (traceback, exit 1) | call RUNS (fail open) |
+  | explicit deny JSON, exit 0 | call BLOCKED |
+
+  **Requirement:** the gate hook must wrap everything in a catch-all and, on any exception
+  (including hub/DB unreachable, bad input, internal bug), fail closed by printing the explicit
+  deny JSON (or exiting 2). Only a deliberate `allow`/`ask` reply may let a call proceed.
+- **Hook timeout expiry fails OPEN.** With `"timeout": 5` and a hook sleeping 15s, Claude Code
+  abandoned the hook after about 5s and the call ran (`source:"config"`, run took 7.5s).
+  **Requirement:** the hook enforces its own deadline strictly below the configured timeout
+  (e.g. 3600s configured, internal deadline a few seconds less) and prints the deny JSON on
+  expiry, so Claude Code's timeout never fires.
+- **Matcher must equal the gated tool set.** The hook runs only for tools matching the
+  `matcher`; any tool outside it falls through to the config auto-allow or the permission tool.
+  Set the matcher to exactly the gated set: `Bash|WebFetch|Write|Edit` plus `NotebookEdit` if
+  the agent's tool list includes it, and keep it in sync with the per-agent tool policy.
+- **Permission modes.** The hook fired and denied under `--permission-mode` `acceptEdits`,
+  `dontAsk` and `default` (deny verified: `permission_decision` `reject`, `source:"hook"`).
+  `manual` does not stop the auto-allow (earlier). **Requirement:** the gate pins the mode
+  explicitly (`--permission-mode default`) on every spawn and does not inherit one; hook deny
+  was verified under `default`. `bypassPermissions` was not tested and must never be used.
+- **Precedence (hook vs config vs permission tool):**
+  - Hook `allow` on a call that would otherwise prompt (`echo hi > f1.txt`, Bash not in
+    allowedTools) runs it and the permission tool is NOT called (`source:"hook"`).
+  - Hook `deny` beats an `--allowedTools "Bash(echo:*)"` match: blocked, file not created.
+  - Hook `ask` overrides an `--allowedTools` match too: the call went to the permission tool
+    (its deny message reached the agent, file not created).
+  So the hook's decision is final for allow/deny, and `ask` forces the permission tool.
 
 ## 5. Design (decided with the operator)
 
