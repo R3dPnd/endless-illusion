@@ -112,6 +112,33 @@ def test_lab_digest_requires_published_sha256(tmp_path):
     assert not od.lab_digest_ok(f, {"name": "a.zip", "digest": "sha256:" + "0" * 64})
 
 
+def _fake_lsof(monkeypatch, stdout="", returncode=0, missing=False):
+    import subprocess
+
+    def run(cmd, **kw):
+        if missing:
+            raise FileNotFoundError("lsof")
+        return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+
+    monkeypatch.setattr(od.subprocess, "run", run)
+
+
+def test_lab_bind_ok_fails_closed(monkeypatch):
+    good = "p42\nf22\nn127.0.0.1:3000\n"
+    _fake_lsof(monkeypatch, good)
+    assert od.lab_bind_ok(42, wait=0) == (True, "")
+    for kwargs, word in (
+        ({"missing": True}, "lsof"),
+        ({"returncode": 1, "stdout": good}, "exit"),
+        ({"stdout": ""}, "no listening"),
+        ({"stdout": "p42\nf22\nn*:3000\n"}, "*:3000"),
+        ({"stdout": good + "f23\nn[::1]:3000\n"}, "[::1]:3000"),
+    ):
+        _fake_lsof(monkeypatch, **kwargs)
+        ok, reason = od.lab_bind_ok(42, wait=0)
+        assert not ok and word in reason, (kwargs, reason)
+
+
 def test_bind_shim_forces_loopback(tmp_path):
     import json
     import shutil

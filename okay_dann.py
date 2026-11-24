@@ -413,19 +413,41 @@ def lab_pids() -> list[int]:
     return [pid for pid, _, argv in find_running() if is_lab(argv)]
 
 
-def lab_bad_sockets(pid: int) -> list[str]:
-    """Listening sockets of `pid` that are not 127.0.0.1:<LAB_PORT> (lsof -Fn names)."""
-    out = subprocess.run(
-        ["lsof", "-nP", f"-iTCP:{LAB_PORT}", "-sTCP:LISTEN", "-a", "-p", str(pid), "-Fn"], capture_output=True, text=True
-    ).stdout
-    names = [line[1:] for line in out.splitlines() if line.startswith("n")]
-    return [n for n in names if n != f"{LAB_HOST}:{LAB_PORT}"]
+def lab_bind_ok(pid: int, wait: float = 3.0) -> tuple[bool, str]:
+    """Fails closed: ok only if lsof ran (exit 0), lists at least one LISTEN
+    socket for `pid`, and every one is exactly 127.0.0.1:<LAB_PORT>. Retries
+    for up to `wait` seconds while the socket isn't visible yet."""
+    want = f"{LAB_HOST}:{LAB_PORT}"
+    deadline = time.time() + wait
+    while True:
+        try:
+            res = subprocess.run(
+                ["lsof", "-nP", f"-iTCP:{LAB_PORT}", "-sTCP:LISTEN", "-a", "-p", str(pid), "-Fn"],
+                capture_output=True, text=True,
+            )
+        except OSError as exc:
+            return False, f"can't verify the bind address (lsof: {exc})"
+        names = [line[1:] for line in res.stdout.splitlines() if line.startswith("n")]
+        if res.returncode == 0 and names:
+            bad = [n for n in names if n != want]
+            return (False, f"listening on {', '.join(bad)}, not only {want}") if bad else (True, "")
+        if time.time() >= deadline:
+            reason = f"lsof exit {res.returncode}" if res.returncode else "no listening socket found for the process"
+            return False, f"can't verify the bind address ({reason})"
+        time.sleep(0.25)
 
 
 def cmd_lab_start(args) -> int:
-    if lab_pids() and lab_listening():
-        say(f"Juice Shop is already up at {LAB_URL}.")
-        return 0
+    running = lab_pids()
+    if running and lab_listening():
+        results = [lab_bind_ok(pid) for pid in running]
+        if all(ok for ok, _ in results):
+            say(f"Juice Shop is already up at {LAB_URL}.")
+            return 0
+        terminate(running)
+        reasons = "; ".join(r for ok, r in results if not ok)
+        say(f"lab was listening beyond {LAB_HOST} ({reasons}); stopped it — run `okay-dann lab start` again")
+        return 1
     if lab_listening():
         say(f"Something else already listens on {LAB_HOST}:{LAB_PORT}; not starting.")
         return 1
@@ -451,10 +473,10 @@ def cmd_lab_start(args) -> int:
             say(f"Juice Shop exited with code {proc.returncode}; see {log}")
             return 1
         if lab_listening():
-            bad = lab_bad_sockets(proc.pid)
-            if bad:
+            ok, reason = lab_bind_ok(proc.pid)
+            if not ok:
                 terminate([proc.pid])
-                say(f"Juice Shop listened on {bad}, not {LAB_HOST} only; stopped it.")
+                say(f"Juice Shop stopped: {reason}.")
                 return 1
             say(f"Juice Shop is up at {LAB_URL} (bound to {LAB_HOST} only).")
             return 0
