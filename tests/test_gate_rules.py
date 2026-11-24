@@ -122,14 +122,14 @@ def test_scope_empty_entries_ignored():
 
 def test_local_pipeline_allowed(wd):
     assert classify_bash("grep -i sql out.txt | sort | uniq", wd) == "local"
-    assert classify_bash("cat a.txt > out.txt 2>&1", wd) == "local"
+    assert classify_bash(f"cat a.txt > {wd}/out.txt 2>&1", wd) == "local"
     assert classify_bash("grep x f 2>/dev/null && ls; pwd", wd) == "local"
-    assert classify_bash("cat x >> notes/out.txt", wd) == "local"
-    assert classify_bash("echo hi | tee out.txt", wd) == "local"
-    assert classify_bash("sed -i s/a/b/ f.txt", wd) == "local"
+    assert classify_bash(f"cat x >> {wd}/notes/out.txt", wd) == "local"
+    assert classify_bash(f"echo hi | tee {wd}/out.txt", wd) == "local"
+    assert classify_bash(f"sed -i s/a/b/ {wd}/f.txt", wd) == "local"
     assert classify_bash("sed -n 1,5p f.txt", wd) == "local"
     assert classify_bash("awk -F, 'NR==1' f", wd) == "local"
-    assert classify_bash("mkdir -p a/b", wd) == "local"
+    assert classify_bash(f"mkdir -p {wd}/a/b", wd) == "local"
     assert classify_bash("cat README.md script.sh", wd) == "local"
 
 
@@ -141,6 +141,20 @@ def test_local_with_redirect_outside_workdir_gated(wd):
     assert classify_bash("cat x &> /tmp/x", wd) == "gated"
     assert classify_bash("cat x >&/tmp/x", wd) == "gated"
     assert classify_bash("cat x >| /tmp/x", wd) == "gated"
+
+
+def test_relative_write_targets_gated(wd):
+    # R9: the shell's cwd is unobservable, so only absolute in-workdir targets are local
+    for cmd in [
+        "cat x > out.txt",
+        "cat x >> notes/out.txt",
+        "echo hi | tee out.txt",
+        "sed -i s/a/b/ f.txt",
+        "mkdir -p a/b",
+        "mkdir a",
+        "cat x > ./out.txt",
+    ]:
+        assert classify_bash(cmd, wd) == "gated", cmd
 
 
 def test_unlisted_binary_gated(wd):
@@ -233,25 +247,61 @@ def test_xargs_and_procsub_gated(wd):
         "cat x > $HOME/y",
         'cat x > "$(pwd)/y"',
         "echo a\x00b",
+        # fix round 1
+        "rg x *",
+        "sort *",
+        "cat ?",
+        "cat [a]",
+        "cat x *.txt",
+        f"tee {{wd}}/.[.]/y",
+        f"tee {{wd}}/ln?/y",
+        f"cat x > {{wd}}/--pre=sh",
+        f"tee {{wd}}/-x",
+        f"mkdir {{wd}}/-p",
+        f"sed -i s/a/b/ {{wd}}/-f",
+        "cat x >! /etc/passwd",
+        "cat x >>! ~/.zshrc",
+        "cat x >&! /path",
+        "cat x > !",
+        "cat x >! out",
+        "cat x > $=HOME/.zshrc",
+        "cat x > $~HOME/.zshrc",
+        "cat x > $^HOME/.zshrc",
+        "cat x > $[1]/y",
+        "cat $",
+        "sed -i'/etc/*' s/a/a/ f.txt",
+        "sed -i.bak s/a/a/ f.txt",
+        "sed --in-place=../../* s/a/a/ f.txt",
+        "sed --in-place=x s/a/a/ f.txt",
+        "cat x > ~-/y",
+        "tee ~-/y",
+        "tee ~+/y",
+        "tee ~1/y",
+        "cat x > ~root/y",
+        "cat x > ~+/y",
+        "cat x << EOF",
     ],
 )
 def test_bypass_cases_gated(cmd, wd):
+    cmd = cmd.replace("{wd}", str(wd))
     assert classify_bash(cmd, wd) == "gated", cmd
 
 
 def test_symlink_in_workdir_escape(wd, tmp_path_factory):
     outside = tmp_path_factory.mktemp("outside").resolve()
     (wd / "link").symlink_to(outside)
-    assert classify_bash("cat x > link/y", wd) == "gated"
-    assert classify_write("link/y", wd) == "denied"
-    assert classify_bash("cat x > real.txt", wd) == "local"
+    assert classify_bash(f"cat x > {wd}/link/y", wd) == "gated"
+    assert classify_write(f"{wd}/link/y", wd) == "denied"
+    assert classify_bash(f"cat x > {wd}/real.txt", wd) == "local"
 
 
 def test_write_inside_workdir_only(wd):
     assert classify_write("../../etc/x", wd) == "denied"
-    assert classify_write("a/b.txt", wd) == "local"
+    assert classify_write("a/b.txt", wd) == "denied"  # relative paths refused
+    assert classify_write("./b.txt", wd) == "denied"
+    assert classify_write("~-/b", wd) == "denied"
     assert classify_write(str(wd / "a" / "b.txt"), wd) == "local"
-    assert classify_write("a/../b.txt", wd) == "local"
+    assert classify_write(str(wd / "a" / ".." / "b.txt"), wd) == "local"
     assert classify_write("/etc/x", wd) == "denied"
     assert classify_write("~/x", wd) == "denied"
     assert classify_write("a/../../x", wd) == "denied"
@@ -264,3 +314,40 @@ def test_tilde_expands_to_real_home_not_workdir(wd, monkeypatch):
     monkeypatch.setenv("HOME", str(wd))  # a spoofed HOME must not make ~ look local
     assert classify_write("~/x", wd) == "denied"
     assert classify_bash("cat x > ~/y", wd) == "gated"
+
+
+IN = ["in.scope.com"]
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "curl in.scope.com evil.com#x",
+        "curl in.scope.com evil.com%",
+        "curl in.scope.com evil.com+x",
+        "curl in.scope.com b\u00fccher.de",
+        "curl in.scope.com ex\u0430mple.com",
+        "curl in.scope.com evil\u3002com",
+        "curl --resolve in.scope.com:443:2606:4700::1111 https://in.scope.com",
+        "curl in.scope.com 127.1",
+        "curl in.scope.com 1234567",
+        "curl in.scope.com 0x7f.1",
+        "curl in.scope.com intranet",
+        "curl in.scope.com -xintranet",
+        "bash -c 'curl in.scope.com intranet'",
+        "curl in.scope.com 'a b'",
+    ],
+)
+def test_hidden_host_next_to_in_scope_host_is_not_in(cmd):
+    hosts, indirect = extract_hosts(cmd)
+    assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), (cmd, hosts, indirect)
+
+
+def test_unbracketed_ipv6_detected():
+    hosts, _ = extract_hosts("curl --resolve a.com:443:2606:4700::1111 x")
+    assert any("2606:4700::1111" in h for h in hosts)
+
+
+def test_strict_ok_shapes_stay_known():
+    assert extract_hosts("curl -s -X POST http://localhost:3000/x -m 5") == (["localhost:3000"], False)
+    assert extract_hosts("curl in.scope.com")[1] is False

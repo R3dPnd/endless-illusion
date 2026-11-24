@@ -37,18 +37,20 @@ _TLDS = frozenset(
 
 _URL_RE = re.compile(r"(?<![A-Za-z0-9_/.\-])(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//([^\s'\"`<>/?#\\]+)")
 _V6_RE = re.compile(r"\[([0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)\](?::(\d{1,5}))?")
-_SPLIT_RE = re.compile(r"[\s'\"`=,;|&()<>@/\\{}!*?\[\]]+")
+_SPLIT_RE = re.compile(r"[^a-z0-9_.:\-]+")
+_V6_TAIL_RE = re.compile(r"(?<![0-9a-z])(?:[0-9a-f]{0,4}:){2,}[0-9a-f.]{0,15}")
 _TOKEN_RE = re.compile(r"^([a-z0-9_.\-]+?)(?::(\d{1,5}))?$")
-_NUMERIC_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){2,3}$")
-_INT_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|\d{8,})$")
+_NUMERIC_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){1,3}$")
+_INT_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|\d{6,})$")
 _LABEL_RE = re.compile(r"^[a-z0-9_\-]+$")
 
 _INDIRECT_RE = re.compile(
-    r"\$(?=[A-Za-z_{(@*#?!$\-'\"])"  # $VAR ${..} $(..) $@ $' $"  (but not $1: positional/awk field)
+    r"\$"  # any $: $VAR ${..} $(..) $'..' and zsh forms ($=X $~X $^X $[..])
     r"|`"
     r"|\beval\b|\bbase64\b|\bxxd\b"
     r"|\\x[0-9a-fA-F]{2}"
     r"|\{[^{}]*(?:,|\.\.)[^{}]*\}"  # brace expansion
+    r"|[^\x00-\x7f]"  # non-ASCII: homoglyph / fullwidth-dot hosts
 )
 
 
@@ -71,28 +73,14 @@ def _authority(auth: str) -> str | None:
     return f"{host}:{port}" if port else host
 
 
-def extract_hosts(text: str, *, file_like: bool = True) -> tuple[list[str], bool]:
-    """Return `(hosts, indirect)` for a command line or URL text.
-
-    Hosts come from URLs (any scheme, incl. single-label hosts), bracketed IPv6,
-    `host:port` tokens, bare `name.tld` domains (known TLDs), `localhost`, IPv4
-    and obfuscated numeric IPs (hex / decimal / 3-part dotted).  Each is
-    lowercased, as `host` or `host:port` (port only when explicit).
-
-    `indirect` is True when the text can build a host at run time: `$VAR`,
-    `${...}`, `$(...)`, backticks, `eval`, `base64`/`xxd`, hex escapes, or brace
-    expansion.  A verdict on such text can never be trusted.
-
-    `file_like=False` ignores bare-domain matches whose TLD doubles as a common
-    file extension (`.sh .py .md .rs .pl .zip .mov`) -- only used when no
-    network-capable command is involved.
-    """
+def _scan_hosts(text: str, file_like: bool) -> list[str]:
     hosts: list[str] = []
 
     def add(h: str | None) -> None:
         if h and h not in hosts:
             hosts.append(h)
 
+    low = text.lower()
     for m in _URL_RE.finditer(text):
         add(_authority(m.group(1)))
     for m in _V6_RE.finditer(text):
@@ -104,7 +92,9 @@ def extract_hosts(text: str, *, file_like: bool = True) -> tuple[list[str], bool
             return
         hp = f"{h}:{port}" if port else h
         if _INT_IP_RE.match(h) or _NUMERIC_IP_RE.match(h):
-            add(hp)
+            # file_like=False (local-only commands): only unmistakable dotted quads
+            if file_like or h.count(".") == 3:
+                add(hp)
             return
         labels = h.split(".")
         if not all(_LABEL_RE.match(label) for label in labels):
@@ -116,18 +106,85 @@ def extract_hosts(text: str, *, file_like: bool = True) -> tuple[list[str], bool
         elif len(labels) == 1 and (h == "localhost" or (port and h[0].isalpha())):
             add(hp)
 
-    for tok in _SPLIT_RE.split(text.lower()):
+    for tok in _SPLIT_RE.split(low):
         tok = tok.strip(".:")
         if not tok:
             continue
+        if tok.count(":") >= 2:
+            for m in _V6_TAIL_RE.finditer(tok):
+                v6 = m.group(0).strip(".")
+                if v6 and not file_like and not re.search(r"[a-f]|::", v6):
+                    continue  # looks like a clock time in a local-only command
+                if v6:
+                    add(v6)
         m = _TOKEN_RE.match(tok)
         if m:
             bare(m.group(1), m.group(2))
         elif ":" in tok:
             for part in tok.split(":"):
                 bare(part.strip("."), None)
+    return hosts
 
-    return hosts, bool(_INDIRECT_RE.search(text))
+
+_FLAG_RE = re.compile(r"^(?:-[A-Za-z]{1,6}|--[A-Za-z][A-Za-z0-9\-]*)$")
+_METHOD_RE = re.compile(r"^[A-Z]{3,7}$")
+_SMALL_INT_RE = re.compile(r"^\d{1,5}$")
+
+
+def _unclassified_words(text: str, workdir: Path | None) -> bool:
+    """True if a non-head word is neither a flag, a host, a method, a small int,
+    nor an absolute path inside workdir (so it could hide an undetected host)."""
+    try:
+        toks = _tokenize(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
+    except _Unparseable:
+        return True
+    at_head = True
+    for kind, val in toks:
+        if kind == "op":
+            at_head = val in _SPLIT_OPS
+            continue
+        if at_head:
+            at_head = False
+            continue
+        for part in val.split() or [val]:
+            if _FLAG_RE.match(part) or _METHOD_RE.match(part) or _SMALL_INT_RE.match(part):
+                continue
+            if _scan_hosts(part, True):
+                continue
+            if workdir is not None and part.startswith("/") and _inside(part, workdir):
+                continue
+            return True
+    return False
+
+
+def extract_hosts(
+    text: str, *, file_like: bool = True, strict: bool = True, workdir: Path | None = None
+) -> tuple[list[str], bool]:
+    """Return `(hosts, indirect)` for a command line or URL text.
+
+    Hosts come from URLs (any scheme, incl. single-label hosts), bracketed and
+    unbracketed IPv6, `host:port` tokens, bare `name.tld` domains (known TLDs,
+    found anywhere inside a token), `localhost`, IPv4 and obfuscated numeric IPs
+    (hex / decimal / 2-4 part dotted).  Each is lowercased, as `host` or
+    `host:port` (port only when explicit).
+
+    `indirect` is True when the text can build or hide a host: any `$`,
+    backticks, `eval`, `base64`/`xxd`, hex escapes, brace expansion, any
+    non-ASCII character, an unparseable command line, and (with `strict`) any
+    non-head word that is not a flag, a host-bearing word, an upper-case method,
+    a small integer or an absolute path inside `workdir`.  A verdict on such
+    text can never be trusted ("unknown").  Over-triggering is intentional.
+
+    `file_like=False` ignores bare-domain matches whose TLD doubles as a common
+    file extension (`.sh .py .md .rs .pl .zip .mov`) and lone numerics -- only
+    used when no network-capable command is involved.  `strict=False` skips the
+    word-classification rule (also for local-only commands).
+    """
+    hosts = _scan_hosts(text, file_like)
+    indirect = bool(_INDIRECT_RE.search(text))
+    if strict and not indirect:
+        indirect = _unclassified_words(text, workdir)
+    return hosts, indirect
 
 
 # ---------------------------------------------------------------- scope verdicts
@@ -202,24 +259,25 @@ def _real_home() -> str:
         return os.path.expanduser("~")
 
 
-def _resolve(path: str, workdir: Path) -> Path | None:
+def _abs_resolved(path: str) -> Path | None:
+    """Resolved absolute path, or None.  Relative paths are refused (the shell's
+    cwd is not observable); only `~` and `~/...` tilde forms are expanded."""
     if not path or "\x00" in path:
         return None
     if path == "~" or path.startswith("~/"):
         path = _real_home() + path[1:]
     elif path.startswith("~"):
-        path = os.path.expanduser(path)  # ~user; unknown user stays literal like the shell
+        return None  # ~user, ~-, ~+, ~N ...
+    if not path.startswith("/"):
+        return None
     try:
-        p = Path(path)
-        if not p.is_absolute():
-            p = Path(workdir) / p
-        return p.resolve()
+        return Path(path).resolve()
     except (OSError, ValueError, RuntimeError):
         return None
 
 
 def _inside(path: str, workdir: Path) -> bool:
-    r = _resolve(path, workdir)
+    r = _abs_resolved(path)
     if r is None:
         return False
     try:
@@ -228,8 +286,14 @@ def _inside(path: str, workdir: Path) -> bool:
         return False
 
 
+def _write_ok(path: str, workdir: Path) -> bool:
+    """Absolute path resolving inside workdir whose basename cannot be an option."""
+    return _inside(path, workdir) and not os.path.basename(path.rstrip("/")).startswith("-")
+
+
 def classify_write(path: str, workdir: Path) -> str:
-    """`"local"` if the fully resolved path is inside workdir, else `"denied"`."""
+    """`"local"` if the path is absolute and resolves (symlinks, `..`, `~`) inside
+    workdir, else `"denied"`.  Relative paths are denied."""
     return "local" if _inside(path, workdir) else "denied"
 
 
@@ -244,8 +308,9 @@ class _Unparseable(Exception):
     pass
 
 
-def _tokenize(cmd: str) -> list[tuple[str, str]]:
-    """Minimal POSIX-ish tokenizer -> [("word"|"op", text)].  Raises on anything odd."""
+def _tokenize(cmd: str, glob_ok: bool = False) -> list[tuple[str, str]]:
+    """Minimal POSIX-ish tokenizer -> [("word"|"op", text)].  Raises on anything odd,
+    including (unless glob_ok) any unquoted glob char: globs can inject options."""
     toks: list[tuple[str, str]] = []
     i, n = 0, len(cmd)
     cur: list[str] = []
@@ -299,6 +364,8 @@ def _tokenize(cmd: str) -> list[tuple[str, str]]:
             have = True
             i += 2
         else:
+            if c in "*?[" and not glob_ok:
+                raise _Unparseable("unquoted glob")
             cur.append(c)
             have = True
             i += 1
@@ -405,7 +472,7 @@ def _sed_ok(args: list[str], workdir: Path) -> bool:
             name, eq, val = a.partition("=")
             if name in ("--quiet", "--silent", "--regexp-extended", "--posix", "--null-data", "--separate") and not eq:
                 continue
-            if name == "--in-place":
+            if name == "--in-place" and not eq:  # a backup suffix could point anywhere
                 in_place = True
                 continue
             if name == "--expression":
@@ -425,8 +492,10 @@ def _sed_ok(args: list[str], workdir: Path) -> bool:
                 if ch in "nEsrz":
                     j += 1
                 elif ch == "i":
+                    if j + 1 != len(a):
+                        return False  # `-iSUFFIX`: backup file could land outside workdir
                     in_place = True
-                    break  # rest of cluster is the backup suffix
+                    break
                 elif ch == "e":
                     rest = a[j + 1 :]
                     if rest:
@@ -447,7 +516,7 @@ def _sed_ok(args: list[str], workdir: Path) -> bool:
         scripts.append(files.pop(0))
     if not all(_sed_script_safe(s) for s in scripts):
         return False
-    return not in_place or all(_inside(f, workdir) for f in files)
+    return not in_place or all(_write_ok(f, workdir) for f in files)
 
 
 def _args_ok(head: str, args: list[str], workdir: Path) -> bool:
@@ -458,10 +527,10 @@ def _args_ok(head: str, args: list[str], workdir: Path) -> bool:
         return _sed_ok(args, workdir)
     if head == "tee":
         pos = _parse_opts(args, "aip", "", {"--append", "--ignore-interrupts"}, set())
-        return pos is not None and all(_inside(p, workdir) for p in pos)
+        return pos is not None and all(_write_ok(p, workdir) for p in pos)
     if head == "mkdir":
         pos = _parse_opts(args, "pv", "", {"--parents", "--verbose"}, set())
-        return pos is not None and bool(pos) and all(_inside(p, workdir) for p in pos)
+        return pos is not None and bool(pos) and all(_write_ok(p, workdir) for p in pos)
     if head == "sort":
         pos = _parse_opts(
             args,
@@ -483,7 +552,7 @@ def _args_ok(head: str, args: list[str], workdir: Path) -> bool:
             {"--count", "--repeated", "--ignore-case", "--unique", "--zero-terminated"},
             {"--skip-fields", "--skip-chars", "--check-chars"},
         )
-        return pos is not None and all(_inside(p, workdir) for p in pos)
+        return pos is not None and all(_write_ok(p, workdir) for p in pos)
     if head == "rg":
         return not any(a.startswith(("--pre", "--hostname-bin")) for a in args)
     if head == "file":
@@ -504,7 +573,7 @@ def classify_bash(command: str, workdir: Path) -> str:
     """
     if not command or not command.strip() or any(c in command for c in "\n\r\x00"):
         return "gated"
-    hosts, indirect = extract_hosts(command, file_like=False)
+    hosts, indirect = extract_hosts(command, file_like=False, strict=False)
     if hosts or indirect:
         return "gated"
     try:
@@ -530,7 +599,7 @@ def classify_bash(command: str, workdir: Path) -> str:
             i += 1
             if val == ">&" and (target == "-" or target.isdigit()):
                 continue  # fd duplication, e.g. 2>&1
-            if target != "/dev/null" and not _inside(target, workdir):
+            if target != "/dev/null" and not _write_ok(target, workdir):
                 return "gated"
         else:
             return "gated"  # &, (, ), <, <<, <(, >(, |&, ;; ...
