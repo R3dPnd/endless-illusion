@@ -447,3 +447,82 @@ def test_output_flag_per_program(wd):
     assert not ok(f"ssh -o {wd}/x in.scope.com")
     assert not ok(f"wget -o {wd}/x in.scope.com")
     assert not ok(f"curl -O {wd}/x in.scope.com")
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "ssh -X INTRANET in.scope.com",
+        "ssh -X 'INTRANET' in.scope.com",
+        "ssh -X \"EVILHOST\" in.scope.com",
+        "ping -X 'ABC' in.scope.com",
+        "nmap -X 'ABC' in.scope.com",
+        "wget -X 'DIR' in.scope.com",
+        "nc -X CONNECT in.scope.com",
+        "curl -p 127 in.scope.com",
+        "wget -r 99999 in.scope.com",
+        "curl -J in.scope.com evil",
+        "curl -K in.scope.com",
+        "wget -i in.scope.com",
+        "wget -e in.scope.com in.scope.com",
+        "nmap -iL in.scope.com",
+        "ssh -F in.scope.com in.scope.com",
+        "curl --unknown-flag in.scope.com",
+        "curl --silent=x in.scope.com",
+        "python3 -u in.scope.com",
+        "dig -t A in.scope.com",
+    ],
+)
+def test_flag_meaning_is_per_program(cmd):
+    hosts, indirect = extract_hosts(cmd)
+    assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), (cmd, hosts, indirect)
+
+
+# flag/value -> the only programs where that flag takes that value
+_VALUE_ALLOWANCES = {
+    ("-X", "POST"): ["curl"],
+    ("-X", "INTRANET"): ["curl"],
+    ("-p", "22"): ["ssh", "nc", "nmap", "dig"],
+    ("-p", "127"): ["ssh", "nc", "nmap", "dig"],
+    ("-r", "5"): [],
+    ("-r", "99999"): [],
+}
+_ALL_HEADS = (
+    "curl wget ssh nc nmap http httpie dig nslookup host ping python python3 node ruby perl cat echo"
+).split()
+
+
+@pytest.mark.parametrize(
+    "flag,value,prog",
+    [
+        (flag, value, prog)
+        for (flag, value), ok in _VALUE_ALLOWANCES.items()
+        for prog in _ALL_HEADS
+        if prog not in ok
+    ],
+)
+def test_value_allowances_do_not_leak_across_programs(flag, value, prog):
+    hosts, indirect = extract_hosts(f"{prog} {flag} {value} in.scope.com")
+    assert scope_verdict(hosts, indirect, IN) in ("out", "unknown"), (prog, flag, value)
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "curl -X POST in.scope.com",
+        "ssh -p 22 in.scope.com",
+        "ssh -X in.scope.com",
+        "ssh -X -p 22 in.scope.com",
+        "curl -p -x in.scope.com:3128 in.scope.com",
+        "wget -r in.scope.com",
+        "wget -qr --tries 3 in.scope.com",
+        "nc -vz in.scope.com",
+        "nmap -p 443 in.scope.com",
+        "ping -c 1 in.scope.com",
+        "dig -p 53 in.scope.com",
+        "curl -O in.scope.com",
+    ],
+)
+def test_per_program_legit_shapes_stay_in(cmd):
+    hosts, indirect = extract_hosts(cmd)
+    assert scope_verdict(hosts, indirect, IN + ["in.scope.com:3128"]) == "in", (cmd, hosts, indirect)

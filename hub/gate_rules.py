@@ -129,20 +129,74 @@ def _scan_hosts(text: str, file_like: bool) -> list[str]:
 _KNOWN_HEADS = frozenset(
     "curl wget ssh nc nmap http httpie python python3 node ruby perl dig nslookup host ping".split()
 ) | LOCAL_COMMANDS
-_BOOL_CLUSTER = frozenset("sSikLvfIqnN46")
-_SHORT_METHOD = frozenset("X")
-_SHORT_NUM = frozenset("mpPr")
-_SHORT_VALUE = frozenset("xJKioOdHeAbcuTF")
-# only output-file flags may take a workdir path (others read it as input); per program
-_OUT_SHORT = {"curl": "o", "wget": "O"}
-_OUT_LONG = {"curl": "--output", "wget": "--output-document"}
-_LONG_METHOD = frozenset({"--request"})
-_LONG_NUM = frozenset({"--max-time", "--connect-timeout", "--retry", "--limit-rate", "--max-redirs"})
-_LONG_VALUE = frozenset(
-    """--proxy --connect-to --resolve --output --data --header --referer --user-agent --cookie --cookie-jar
-    --user --upload-file --form --proxy-user --config --interface --dns-servers --doh-url --socks5
-    --socks5-hostname --preproxy --json --url --data-raw --data-binary --data-urlencode""".split()
-)
+
+
+def _flag_table(bool_: str = "", method: str = "", num: str = "", value: str = "", out: str = "",
+                long_bool: str = "", long_method: str = "", long_num: str = "", long_value: str = "",
+                long_out: str = "") -> dict[str, str]:
+    """Build one program's flag table: `-x` / `--name` -> kind.  Short groups are
+    strings of letters; long groups are space-separated names without `--`."""
+    t: dict[str, str] = {}
+    for kind, letters in (("bool", bool_), ("method", method), ("num", num), ("value", value), ("out", out)):
+        for c in letters:
+            assert f"-{c}" not in t, c
+            t[f"-{c}"] = kind
+    for kind, names in (("bool", long_bool), ("method", long_method), ("num", long_num),
+                        ("value", long_value), ("out", long_out)):
+        for n in names.split():
+            assert f"--{n}" not in t, n
+            t[f"--{n}"] = kind
+    return t
+
+
+# Per-program flag semantics.  Kinds: "bool" (no value; may be clustered),
+# "method" (upper-case HTTP method), "num" (small integer), "value" (must be
+# exactly one host/URL), "out" (output file: absolute workdir path).  A flag NOT
+# listed for its program -- and every flag of a program with an empty table --
+# makes the text indirect ("unknown").  Only flags whose meaning for that program
+# is certain are listed; input-file / config / command flags (curl -K, wget -i/-e,
+# nmap -iL, ssh -F/-o/-L/-R/-D/-W) are deliberately absent.
+_FLAGS: dict[str, dict[str, str]] = {
+    "curl": _flag_table(
+        bool_="sSikLvfIqnN46pO",  # -p = --proxytunnel, -O = --remote-name
+        method="X",
+        num="m",
+        value="xHdAeu",
+        out="o",
+        long_bool="silent show-error insecure location verbose fail head include compressed ipv4 ipv6 "
+        "proxytunnel remote-name no-buffer netrc",
+        long_method="request",
+        long_num="max-time connect-timeout retry max-redirs",
+        long_value="proxy connect-to resolve header referer user-agent user proxy-user preproxy socks5 "
+        "socks5-hostname doh-url interface dns-servers data data-raw data-binary data-urlencode json url",
+        long_out="output",
+    ),
+    "wget": _flag_table(
+        bool_="qvrcNSkp46",  # -r = --recursive, -p = --page-requisites
+        num="tT",  # --tries, --timeout
+        out="O",
+        long_bool="quiet verbose no-verbose recursive continue timestamping server-response spider "
+        "no-check-certificate page-requisites convert-links",
+        long_method="method",
+        long_num="tries timeout",
+        long_value="header user-agent referer",
+        long_out="output-document",
+    ),
+    "ssh": _flag_table(
+        bool_="46AaCfgknNqTtvXxY",  # -X = X11 forwarding (boolean)
+        num="p",
+        value="J",
+    ),
+    "nc": _flag_table(bool_="vznu46", num="wp"),
+    "nmap": _flag_table(bool_="vn6F", num="p"),
+    "http": _flag_table(bool_="vfj", long_bool="verbose form json follow check-status"),
+    "dig": _flag_table(bool_="46", num="p", value="x"),
+    "nslookup": {},
+    "host": _flag_table(bool_="46av", num="W"),
+    "ping": _flag_table(bool_="qnv", num="csWi"),
+}
+_FLAGS["httpie"] = _FLAGS["http"]
+_NO_FLAGS: dict[str, str] = {}  # interpreters, local commands, anything else
 _LONG_FLAG_RE = re.compile(r"^--[A-Za-z][A-Za-z0-9\-]*$")
 _METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
 _NUM_RE = re.compile(r"^\d{1,6}$")
@@ -170,15 +224,16 @@ def _recognized_value(word: str, workdir: Path | None, paths_ok: bool = False) -
 
 def _unclassified_words(text: str, workdir: Path | None) -> bool:
     """True if anything could hide an undetected host: an unknown program name,
-    an unknown/attached-value flag, or a word that is not exactly one host/URL
-    (or an absolute path inside workdir).  Integers and upper-case words are
-    accepted only as the value of a known numeric / method flag."""
+    a flag not listed for this program in `_FLAGS` (or an attached value), or a
+    word that is not exactly one host/URL (or an absolute path inside workdir).
+    Integers and upper-case words are accepted only as the value of a numeric /
+    method flag of the same program."""
     try:
         toks = _tokenize_full(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
     except _Unparseable:
         return True
     at_head = True
-    expect: str | None = None  # "method" | "num" | "value"
+    expect: str | None = None  # "method" | "num" | "value" | "out"
 
     head = ""
 
@@ -212,41 +267,30 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
             continue
         if val == "--":
             continue
-        if val.startswith("--"):
-            name, eq, value = val.partition("=")
-            if not _LONG_FLAG_RE.match(name):
-                return True
-            kind_ = (
-                "method" if name in _LONG_METHOD else "num" if name in _LONG_NUM
-                else "out" if _OUT_LONG.get(head) == name else "value"
-            )
-            if eq:
-                if not check(kind_, value):
-                    return True
-            elif name in _LONG_METHOD:
-                expect = "method"
-            elif name in _LONG_NUM:
-                expect = "num"
-            elif _OUT_LONG.get(head) == name:
-                expect = "out"
-            elif name in _LONG_VALUE:
-                expect = "value"
-            continue
         if val.startswith("-") and len(val) > 1:
-            letters = val[1:]
-            if len(letters) == 1 and letters.isalnum():
-                if letters in _SHORT_METHOD:
-                    expect = "method"
-                elif letters in _SHORT_NUM:
-                    expect = "num"
-                elif _OUT_SHORT.get(head) == letters:
-                    expect = "out"
-                elif head == "curl" and letters == "O":
-                    pass  # curl -O takes no value
-                elif letters in _SHORT_VALUE:
-                    expect = "value"
+            flags = _FLAGS.get(head, _NO_FLAGS)
+            if val.startswith("--"):
+                name, eq, value = val.partition("=")
+                if not _LONG_FLAG_RE.match(name):
+                    return True
+                kind_ = flags.get(name)
+                if kind_ is None:
+                    return True
+                if eq:
+                    if kind_ == "bool" or not check(kind_, value):
+                        return True
+                elif kind_ != "bool":
+                    expect = kind_
                 continue
-            if all(c in _BOOL_CLUSTER for c in letters):
+            letters = val[1:]
+            if len(letters) == 1:
+                kind_ = flags.get(val)
+                if kind_ is None:
+                    return True
+                if kind_ != "bool":
+                    expect = kind_
+                continue
+            if all(flags.get(f"-{c}") == "bool" for c in letters):
                 continue
             return True
         if not _recognized_value(val, workdir, paths_ok=head in LOCAL_COMMANDS):
@@ -270,9 +314,11 @@ def extract_hosts(
     non-ASCII character, an unparseable command line, and (with `strict`) any
     segment head that is not a known program, any word whose dequoted text differs
     from its raw text, any non-head word that is not exactly one host/URL (or a
-    known-safe flag), and any flag value other than a host/URL, an upper-case
-    method after `-X`/`--request`, a number after a known numeric flag, or an
-    absolute `workdir` path as an output-file value.  A verdict on such
+    flag listed for that program in `_FLAGS`), and any flag value other than a
+    host/URL, an upper-case method after that program's method flag (curl
+    `-X`/`--request`), a number after that program's numeric flag, or an
+    absolute `workdir` path as that program's output-file value.  Flag meanings
+    are per program; a flag not listed for its program is unknown.  A verdict on such
     text can never be trusted ("unknown").  Over-triggering is intentional.
 
     `file_like=False` ignores bare-domain matches whose TLD doubles as a common
