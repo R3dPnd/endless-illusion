@@ -36,6 +36,10 @@ def build_session_args(
     `permission_mode`, and `permission_tool` as a backstop. `fork` forks the
     resumed session. With every one left at its default, the argv is exactly a
     plain run's.
+
+    Note: `--setting-sources ""` also drops user-level settings (`env`,
+    `apiKeyHelper`, `model`, ...) for stage runs; keychain/OAuth login is
+    unaffected (verified on Claude Code 2.1.331). Only the `--settings` file applies.
     """
     if fork and not resume:
         raise ValueError("fork needs a session to resume")
@@ -83,10 +87,23 @@ def python_for_children():
     return str(exe)
 
 
-def _write_private(file, data):
-    file.write_text(json.dumps(data, indent=2), encoding="utf8")
+def _private_dir(directory):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
     try:
-        os.chmod(file, 0o600)
+        os.chmod(directory, 0o700)  # mkdir's mode is ignored when it already exists
+    except OSError:
+        pass
+    return directory
+
+
+def _write_private(file, data):
+    """Create (or truncate) `file` as 0600 from the start: never readable by others, even briefly."""
+    fd = os.open(file, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf8") as out:
+        out.write(json.dumps(data, indent=2))
+    try:
+        os.chmod(file, 0o600)  # a pre-existing file keeps its old mode through O_CREAT
     except OSError:
         pass
     return file
@@ -99,8 +116,7 @@ def write_mcp_config(directory, run_id, agents, db_file, shared=None, gate=False
     shared knowledge base when given, plus the ei-gate server (pinned to this
     run's id) when `gate` is set.
     """
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = _private_dir(directory)
     servers = {}
     if shared:
         servers[SHARED_SERVER] = shared
@@ -123,7 +139,6 @@ def write_mcp_config(directory, run_id, agents, db_file, shared=None, gate=False
 
 def write_gate_settings(directory, run_id, db_file, repo_root):
     """Write the per-run `--settings` file that installs the gate's PreToolUse hook (0600)."""
-    directory = Path(directory)
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = _private_dir(directory)
     settings = hook_settings(python_for_children(), str(GATE_SERVER_PY), str(db_file), str(repo_root))
     return _write_private(directory / f"{run_id}.settings.json", settings)

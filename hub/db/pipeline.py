@@ -74,6 +74,17 @@ def set_stage_status(db, stage_id, status):
     db.run("UPDATE ops_stages SET status = ?, finished_at = ? WHERE id = ?", status, now_iso() if status in FINISHED else None, stage_id)
 
 
+def stop_orphaned_stages(db, live_run_ids):
+    """Mark `running` stages whose run isn't live (e.g. after a hub restart) `stopped`."""
+    live = set(live_run_ids or ())
+    with db.transaction():
+        n = 0
+        for r in db.all("SELECT id, run_id FROM ops_stages WHERE status = 'running'"):
+            if r["run_id"] not in live:
+                n += db.run("UPDATE ops_stages SET status = 'stopped', finished_at = ? WHERE id = ? AND status = 'running'", now_iso(), r["id"])[1]
+    return n
+
+
 def stage_rows(db, engagement_id):
     return db.all("SELECT * FROM ops_stages WHERE engagement_id = ? ORDER BY id", engagement_id)
 

@@ -182,6 +182,9 @@ class Runner:
         link = link or {}
         parent = self.resumable(body["continueRun"]) if body.get("continueRun") is not None else None
         task = body.get("task")
+        if parent and not stage and self.db.get("SELECT 1 AS x FROM ops_stages WHERE run_id = ? LIMIT 1", parent["id"]):
+            # A plain follow-up would inherit the stage's (possibly armed) toolset with no gate.
+            raise ValueError("continue a stage run through its engagement")
         if parent:
             # A follow-up keeps its conversation's agent, scope, and authorization.
             agent, scope, authorization = parent["agent"], parent["scope"], parent["authorization"]
@@ -255,6 +258,23 @@ class Runner:
             **gate_args,
         )
 
+        stage_id = None
+        if stage:
+            # Hard requirement, before anything is spawned: the gate finds the run's
+            # engagement through this row, so a stage run without it must not start.
+            try:
+                if stage.get("stageId") is not None:
+                    _, changed = self.db.run("UPDATE ops_stages SET run_id = ?, status = 'running' WHERE id = ?", run_id, stage["stageId"])
+                    if not changed:
+                        raise ValueError(f"no stage {stage['stageId']} to run")
+                    stage_id = stage["stageId"]
+                else:
+                    stage_id = add_stage(self.db, stage["engagementId"], stage["stage"], run_id, stage.get("armed"))
+            except Exception:
+                for f in (mcp_config, gate_args["settings_path"]):
+                    Path(f).unlink(missing_ok=True)
+                raise
+
         run = Run(
             id=run_id,
             agent=agent,
@@ -264,7 +284,7 @@ class Runner:
             programId=link.get("programId"),
             snapshotId=link.get("snapshotId"),
             parentRunId=parent["id"] if parent else None,
-            stageId=None,
+            stageId=stage_id,
             finished=False,
         )
         self.live[run_id] = run
@@ -301,18 +321,6 @@ class Runner:
                 },
             ),
         )
-        if stage:
-            # The gate finds the run's engagement through this row: with no row, every gated call is denied.
-            def record_stage():
-                if stage.get("stageId") is not None:
-                    _, changed = self.db.run("UPDATE ops_stages SET run_id = ?, status = 'running' WHERE id = ?", run_id, stage["stageId"])
-                    if not changed:
-                        raise ValueError(f"no stage {stage['stageId']}; the gate will deny every gated call")
-                    run.stageId = stage["stageId"]
-                else:
-                    run.stageId = add_stage(self.db, stage["engagementId"], stage["stage"], run_id, stage.get("armed"))
-
-            archive("stage", record_stage)
         push(
             {
                 "kind": "meta",

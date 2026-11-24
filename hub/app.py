@@ -26,6 +26,7 @@ from .db.bounties import (
     require_confirmed_snapshot,
     track_lead,
 )
+from .db.pipeline import stop_orphaned_stages
 from .db.read import current, parse_json
 from .gate_service import expire_orphaned
 from .policies import load_policies
@@ -138,6 +139,9 @@ class Hub:
         expired = expire_orphaned(self.db, set())  # no run is live yet: nothing can still be waiting
         if expired:
             print(f"[gate] expired {expired} orphaned pending action(s)")
+        stopped = stop_orphaned_stages(self.db, set())
+        if stopped:
+            print(f"[pipeline] marked {stopped} unfinished stage(s) stopped")
         self.runner = Runner(self.db, self.db_file, self.data_dir, claude_cmd, self.repo_root)
 
         db = self.db

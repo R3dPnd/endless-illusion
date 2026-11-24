@@ -214,3 +214,86 @@ def test_startup_expires_orphaned_pending(tmp_path):
         assert hub.db.get("SELECT status FROM gate_actions WHERE id = ?", aid)["status"] == "expired"
     finally:
         server.shutdown()
+
+
+# ---- fix round 1 ----
+
+
+GATE_FLAGS = ("--settings", "--setting-sources", "--permission-mode", "--permission-prompt-tool")
+
+
+def test_continue_stage_run_without_stage_refused(api, fake):
+    hub, client = api
+    run, _ = start_stage(hub)
+    wait(hub, run.id)
+    fake["argv"].unlink()
+    status, body = client.post("/api/runs", {"continueRun": run.id, "task": "and now?"})
+    assert status == 400
+    assert "continue a stage run through its engagement" in json.dumps(body)
+    assert not fake["argv"].exists()  # no claude process started
+
+
+def test_continue_stage_run_with_stage_is_gated(api, fake):
+    hub, _ = api
+    parent, sid = start_stage(hub)
+    wait(hub, parent.id)
+    eid = stage_row(hub, sid)["engagement_id"]
+    sid2 = add_stage(hub.db, eid, "web", None, True)
+    run = hub.runner.start(
+        {"continueRun": parent.id, "task": "and now?"},
+        stage={"engagementId": eid, "stageId": sid2, "stage": "web", "armed": True, "tools": None, "mcpAgents": None},
+    )
+    wait(hub, run.id)
+    argv = argv_of(fake)
+    assert "--resume" in argv
+    for flag in GATE_FLAGS:
+        assert flag in argv
+    assert at(argv, "--permission-prompt-tool") == PERMISSION_TOOL
+    assert at(argv, "--permission-mode") == "default"
+    assert at(argv, "--setting-sources") == ""
+    assert not GATED & set(at(argv, "--allowedTools").split(","))
+    assert DECLARE_TOOL in at(argv, "--allowedTools").split(",")
+    servers = json.loads(Path(at(argv, "--mcp-config")).read_text(encoding="utf8"))["mcpServers"]
+    assert servers["ei-gate"]["env"] == {"EI_RUN_ID": run.id}
+    assert json.loads(fake["env"].read_text(encoding="utf8"))["EI_RUN_ID"] == run.id
+    assert stage_row(hub, sid2)["run_id"] == run.id
+
+
+def test_stage_record_failure_fails_the_start(api, fake):
+    hub, _ = api
+    eid, _ = new_stage(hub)
+    before = set(hub.runner.live)
+    with pytest.raises(ValueError):
+        hub.runner.start({"agent": "diablo-of-monday", "task": "x"},
+                         stage={"engagementId": eid, "stageId": 999999, "stage": "web", "armed": True})
+    time.sleep(0.3)
+    assert not fake["argv"].exists()  # no claude process started
+    assert set(hub.runner.live) == before
+
+
+def test_startup_stops_running_stages(tmp_path):
+    data = tmp_path / "data"
+    data.mkdir()
+    db = open_db(data / "endless-illusion.db")
+    eng = create_engagement(db, "Old lab", "lab", ["10.0.0.5"], "", "permission")
+    sid = add_stage(db, eng["id"], "web", "dead-run", True)
+    db.close()
+    hub, server, _ = start_hub(tmp_path)
+    try:
+        row = hub.db.get("SELECT status, finished_at FROM ops_stages WHERE id = ?", sid)
+        assert row["status"] == "stopped" and row["finished_at"]
+    finally:
+        server.shutdown()
+
+
+def test_run_config_files_are_private(tmp_path):
+    from hub.session import write_gate_settings, write_mcp_config
+
+    configs = tmp_path / "run-configs"
+    configs.mkdir()
+    os.chmod(configs, 0o755)
+    f1 = write_mcp_config(configs, "r1", [], tmp_path / "db", gate=True, repo_root=tmp_path)
+    f2 = write_gate_settings(configs, "r1", tmp_path / "db", tmp_path)
+    if os.name != "nt":
+        assert stat.S_IMODE(configs.stat().st_mode) == 0o700
+        assert stat.S_IMODE(f1.stat().st_mode) == stat.S_IMODE(f2.stat().st_mode) == 0o600
