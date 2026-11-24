@@ -74,7 +74,7 @@ def test_decide_out_of_scope_409(api):
     assert client.post(f"/api/gate/actions/{aid}/decide", {"approve": False})[0] == 400  # no longer pending
 
 
-def test_decide_unknown_needs_scope_ack_400_or_409(api):
+def test_decide_unknown_needs_scope_ack_409(api):
     # Scope refusals are 409 (GateRefused), same as out-of-scope.
     hub, client = api
     eng = lab(client)
@@ -155,3 +155,28 @@ def test_gate_pending_count(api):
     view = client.get(f"/api/engagements/{b}")[1]
     assert [p["id"] for p in view["pending"]] == [ids[1]]
     assert view["pending"][0]["hosts"] == ["x"] and view["pending"][0]["technique"] == "tech"
+
+
+BAD = ["false", "no", 1, 0.5]
+
+
+def test_gate_booleans_must_be_real_booleans(api):
+    hub, client = api
+    eid = lab(client)["id"]
+    aid = action(hub, eid, "unknown")
+    for bad in BAD:
+        for body in ({"approve": bad}, {"approve": True, "scopeAck": bad}):
+            status, err = client.post(f"/api/gate/actions/{aid}/decide", body)
+            assert status == 400 and "must be true or false" in err["error"], body
+        status, err = client.post(f"/api/engagements/{eid}/stages/discovery/start", {"armed": bad})
+        assert status == 400 and "armed must be true or false" in err["error"]
+    assert client.post(f"/api/gate/actions/{aid}/decide", {})[0] == 400  # approve is required
+    assert hub.db.get("SELECT status FROM gate_actions WHERE id = ?", aid)["status"] == "pending"
+    assert hub.db.get("SELECT COUNT(*) AS n FROM ops_stages WHERE engagement_id = ?", eid)["n"] == 0
+
+
+def test_create_engagement_types(api):
+    _, client = api
+    base = {"name": "x", "kind": "lab", "scopeHosts": ["a"]}
+    for field in ("name", "scopeNotes", "authorization"):
+        assert client.post("/api/engagements", {**base, field: 5})[0] == 400, field

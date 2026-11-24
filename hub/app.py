@@ -226,7 +226,20 @@ class Hub:
             raise HttpError(400, f"unknown stage: {stage}")
         return stage
 
+    @staticmethod
+    def _flag(body, field, required=False):
+        if field not in body:
+            if required:
+                raise HttpError(400, f"{field} must be true or false")
+            return False
+        if not isinstance(body[field], bool):
+            raise HttpError(400, f"{field} must be true or false")
+        return body[field]
+
     def new_engagement(self, body):
+        for field in ("name", "scopeNotes", "authorization"):
+            if body.get(field) is not None and not isinstance(body[field], str):
+                raise HttpError(400, f"{field} must be a string")
         hosts = body.get("scopeHosts", [])
         if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
             raise HttpError(400, "scopeHosts must be a list of strings")
@@ -257,7 +270,7 @@ class Hub:
 
     def stage_start(self, raw_id, stage, body):
         eng = self._eng(raw_id)
-        return start_stage(self, eng["id"], self._stage_name(stage), armed=body.get("armed", False), question=body.get("question"))
+        return start_stage(self, eng["id"], self._stage_name(stage), armed=self._flag(body, "armed"), question=body.get("question"))
 
     def stage_skip(self, raw_id, stage):
         eng = self._eng(raw_id)
@@ -287,14 +300,24 @@ class Hub:
     def engagement_ask(self, raw_id, body):
         eng = self._eng(raw_id)
         stage = self._stage_name(body.get("stage"))
-        return ask(
+        q = ask(
             self, eng["id"], stage, body.get("question"),
             action_id=body.get("actionId"), kind=body.get("kind") or "ask", technique=body.get("technique"),
         )
+        # Same snake_case shape as the detail view's `questions` items.
+        return {
+            "id": q["id"], "stage": q["stage"], "action_id": q["actionId"], "kind": q["kind"], "question": q["question"],
+            "technique": q["technique"], "answer": q["answer"], "created_at": q["createdAt"],
+        }
 
     def gate_decide(self, raw_id, body):
         # GateRefused (an out-of-scope approval, or unknown scope without scopeAck) is a 409; see HubHandler.api.
-        return decide(self.db, int(raw_id), bool(body.get("approve")), body.get("message") or "", bool(body.get("scopeAck")))
+        approve = self._flag(body, "approve", required=True)
+        scope_ack = self._flag(body, "scopeAck")
+        message = body.get("message") or ""
+        if not isinstance(message, str):
+            raise HttpError(400, "message must be a string")
+        return decide(self.db, int(raw_id), approve, message, scope_ack)
 
     def gate_pending(self):
         items = self._pending_view()
