@@ -35,7 +35,7 @@ DECLARE_FIRST = "call declare_action with why, technique and risk first"
 OPERATOR_DENIED = "operator denied"
 CANCELLED = "action was cancelled"
 
-WRITE_PATH_KEYS = {"Write": "file_path", "Edit": "file_path", "NotebookEdit": "notebook_path"}
+WRITE_PATH_KEYS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
 GATED_TOOLS = frozenset({"Bash", "WebFetch", *WRITE_PATH_KEYS})
 
 _SLUG_RE = re.compile(r"^[a-z0-9-]+$")
@@ -118,7 +118,37 @@ def _record(db, ctx, tool_name, tool_input, status, verdict, hosts=(), message=N
 
 
 def check_permission(db, ctx: RunContext | None, tool_name, tool_input, wait: Callable[[int], dict]) -> dict:
-    """Decide one tool call; gated calls block in `wait(action_id)` for the operator."""
+    """Decide one tool call; gated calls block in `wait(action_id)` for the operator.
+
+    Fail-closed: any exception (database locked, a rules bug, a failing `wait`)
+    returns deny `gate error: <ExceptionType>`, with a best-effort `auto_denied`
+    record (and the pending action, if any, expired)."""
+    pending = []
+    try:
+        reply = _decide_call(db, ctx, tool_name, tool_input, pending.append)
+        if reply is not None:
+            return reply
+        reply = wait(pending[0])
+        if not isinstance(reply, dict) or reply.get("behavior") not in ("allow", "deny"):
+            raise TypeError("wait returned a malformed reply")
+        return {"behavior": reply["behavior"], "message": str(reply.get("message") or "")}
+    except Exception as err:
+        msg = f"gate error: {type(err).__name__}"
+        try:
+            if pending:
+                with db.transaction():
+                    db.run(
+                        "UPDATE gate_actions SET status = 'expired', message = ?, decided_at = ? WHERE id = ? AND status = 'pending'",
+                        msg, now_iso(), pending[0],
+                    )
+            _record(db, ctx, tool_name, tool_input if isinstance(tool_input, dict) else {}, "auto_denied", "none", message=msg)
+        except Exception:
+            pass
+        return _deny(msg)
+
+
+def _decide_call(db, ctx, tool_name, tool_input, set_pending) -> dict | None:
+    """The decision proper. Returns a reply, or None after creating a pending action (passed to `set_pending`)."""
     if not isinstance(tool_input, dict):
         tool_input = {}
     if ctx is None:
@@ -169,29 +199,35 @@ def check_permission(db, ctx: RunContext | None, tool_name, tool_input, wait: Ca
             return _deny(DECLARE_FIRST)
         aid = _record(db, ctx, tool_name, tool_input, "pending", verdict, hosts, decl=decl)
         db.run("UPDATE gate_declarations SET used_at = ?, action_id = ? WHERE id = ? AND used_at IS NULL", now_iso(), aid, decl["id"])
-    return wait(aid)
+    set_pending(aid)
+    return None
 
 
-def _reply_for(row) -> dict | None:
-    """The agent's reply for a decided action; None while still pending."""
+def _reply_for(row, run_id=None) -> dict | None:
+    """The agent's reply for a waited-on action; None while still pending.
+    Only an `approved` row (of the waiting run, when given) ever allows."""
     if row is None:
         return _deny("gate action not found")
+    if run_id is not None and row["run_id"] != run_id:
+        return _deny("gate action belongs to another run")
     status = row["status"]
     if status == "pending":
         return None
-    if status in ("approved", "auto_allowed"):
+    if status == "approved":
         return _allow(row["message"] or "")
-    if status in ("denied", "auto_denied"):
+    if status == "denied":
         return _deny(row["message"] or OPERATOR_DENIED)
-    return _deny(CANCELLED)  # expired, cancelled, anything unexpected
+    if status in ("expired", "cancelled"):
+        return _deny(CANCELLED)
+    return _deny(f"action is {status}, not awaiting approval")
 
 
-def wait_for_decision(db, action_id, poll=0.5, timeout=None) -> dict:
+def wait_for_decision(db, action_id, poll=0.5, timeout=None, run_id=None) -> dict:
     """Block until the action is decided. On `timeout` (seconds) it is marked
-    `expired` and denied."""
+    `expired` and denied. With `run_id`, an action of another run is denied."""
     deadline = None if timeout is None else time.monotonic() + timeout
     while True:
-        reply = _reply_for(db.get("SELECT status, message FROM gate_actions WHERE id = ?", action_id))
+        reply = _reply_for(db.get("SELECT run_id, status, message FROM gate_actions WHERE id = ?", action_id), run_id)
         if reply is not None:
             return reply
         if deadline is not None and time.monotonic() >= deadline:
@@ -200,8 +236,8 @@ def wait_for_decision(db, action_id, poll=0.5, timeout=None) -> dict:
                     "UPDATE gate_actions SET status = 'expired', decided_at = ? WHERE id = ? AND status = 'pending'",
                     now_iso(), action_id,
                 )
-                row = db.get("SELECT status, message FROM gate_actions WHERE id = ?", action_id)
-            return _reply_for(row) or _deny(CANCELLED)
+                row = db.get("SELECT run_id, status, message FROM gate_actions WHERE id = ?", action_id)
+            return _reply_for(row, run_id) or _deny(CANCELLED)
         time.sleep(poll)
 
 
@@ -218,7 +254,7 @@ def _action(row):
 def decide(db, action_id, approve: bool, message: str = "", scope_ack: bool = False) -> dict:
     """The operator's decision on a pending action. Returns the updated action.
 
-    Raises GateRefused (409) when approving an `out` verdict, or `unknown`
+    Raises GateRefused (409) when approving an `out` verdict, or `unknown`/`none`
     without `scope_ack`; ValueError when the action isn't pending."""
     with db.transaction():
         row = db.get("SELECT id, status, verdict FROM gate_actions WHERE id = ?", action_id)
@@ -228,7 +264,7 @@ def decide(db, action_id, approve: bool, message: str = "", scope_ack: bool = Fa
             raise ValueError(f"action is already {row['status']}")
         if approve and row["verdict"] == "out":
             raise GateRefused("an out-of-scope action cannot be approved")
-        if approve and row["verdict"] == "unknown" and not scope_ack:
+        if approve and row["verdict"] in ("unknown", "none") and not scope_ack:
             raise GateRefused("scope is unknown: approving needs scopeAck")
         db.run(
             "UPDATE gate_actions SET status = ?, message = ?, scope_ack = ?, decided_at = ? WHERE id = ? AND status = 'pending'",

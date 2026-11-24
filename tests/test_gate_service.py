@@ -395,3 +395,84 @@ def test_other_tools_auto_allowed_and_recorded(db, tmp_path):
     assert reply["behavior"] == "allow"
     a = last_action(db)
     assert (a["tool_name"], a["status"], a["verdict"]) == ("Read", "auto_allowed", "none")
+
+
+def test_exception_in_rules_denies(db, tmp_path, monkeypatch):
+    import hub.gate_service as gs
+
+    ctx = make_ctx(db, tmp_path)
+
+    def boom(*a, **k):
+        raise RuntimeError("rules bug")
+
+    monkeypatch.setattr(gs, "classify_bash", boom)
+    reply = check_permission(db, ctx, "Bash", {"command": "ls"}, no_wait)
+    assert reply == {"behavior": "deny", "message": "gate error: RuntimeError"}
+    a = last_action(db)
+    assert (a["status"], a["message"]) == ("auto_denied", "gate error: RuntimeError")
+
+
+def test_exception_in_rules_denies_even_if_recording_fails(db, tmp_path, monkeypatch):
+    import hub.gate_service as gs
+
+    ctx = make_ctx(db, tmp_path)
+    monkeypatch.setattr(gs, "classify_bash", lambda *a, **k: 1 / 0)
+    monkeypatch.setattr(gs, "_record", lambda *a, **k: 1 / 0)
+    assert check_permission(db, ctx, "Bash", {"command": "ls"}, no_wait) == {
+        "behavior": "deny", "message": "gate error: ZeroDivisionError"}
+
+
+def test_exception_in_wait_denies(db, tmp_path):
+    ctx = make_ctx(db, tmp_path)
+    declare(db, ctx, IN_CMD)
+
+    def bad_wait(action_id):
+        raise OSError("database is locked")
+
+    reply = check_permission(db, ctx, "Bash", {"command": IN_CMD}, bad_wait)
+    assert reply == {"behavior": "deny", "message": "gate error: OSError"}
+    assert pending_actions(db) == []  # the orphaned pending action is expired
+    statuses = [r["status"] for r in db.all("SELECT status FROM gate_actions ORDER BY id")]
+    assert statuses == ["expired", "auto_denied"]
+
+
+def test_malformed_wait_reply_denies(db, tmp_path):
+    ctx = make_ctx(db, tmp_path)
+    declare(db, ctx, IN_CMD)
+    reply = check_permission(db, ctx, "Bash", {"command": IN_CMD}, lambda aid: {"behavior": "maybe"})
+    assert reply["behavior"] == "deny"
+
+
+def test_wait_allows_only_approved_rows(db, tmp_path):
+    ctx = make_ctx(db, tmp_path)
+    check_permission(db, ctx, "Bash", {"command": "ls"}, no_wait)
+    auto = last_action(db)
+    assert auto["status"] == "auto_allowed"
+    assert wait_for_decision(db, auto["id"], timeout=0.1)["behavior"] == "deny"
+    check_permission(db, ctx, "Bash", {"command": IN_CMD}, no_wait)
+    assert wait_for_decision(db, last_action(db)["id"], timeout=0.1)["behavior"] == "deny"
+
+
+def test_wait_bound_to_run(db, tmp_path):
+    ctx = make_ctx(db, tmp_path)
+    aid = pending_one(db, ctx, IN_CMD)
+    decide(db, aid, approve=True)
+    assert wait_for_decision(db, aid, timeout=0.1, run_id="other-run")["behavior"] == "deny"
+    assert wait_for_decision(db, aid, timeout=0.1, run_id=ctx.run_id)["behavior"] == "allow"
+
+
+def test_none_verdict_needs_scope_ack(db, tmp_path):
+    ctx = make_ctx(db, tmp_path)
+    aid = pending_one(db, ctx, IN_CMD)
+    db.run("UPDATE gate_actions SET verdict = 'none' WHERE id = ?", aid)
+    with pytest.raises(GateRefused):
+        decide(db, aid, approve=True)
+    assert decide(db, aid, approve=True, scope_ack=True)["status"] == "approved"
+
+
+def test_multiedit_is_a_write_tool(db, tmp_path):
+    ctx = make_ctx(db, tmp_path)
+    reply = check_permission(db, ctx, "MultiEdit", {"file_path": str(tmp_path / "x.md"), "edits": []}, no_wait)
+    assert reply["behavior"] == "deny"
+    assert last_action(db)["status"] == "auto_denied"
+    assert check_permission(db, ctx, "MultiEdit", {"file_path": str(ctx.workdir / "x.md")}, no_wait)["behavior"] == "allow"
