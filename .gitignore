@@ -30,3 +30,6 @@ data/
 .venv/
 __pycache__/
 .pytest_cache/
+
+# Claude Code worktrees
+.claude/worktrees/
