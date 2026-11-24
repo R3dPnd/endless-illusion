@@ -56,8 +56,11 @@ def schema_for(spec):
     return dict(base)
 
 
-def build_tools(db, agent, run_id, read_only=False):
-    """name -> (description, input schema, handler(args) -> result). `read_only` leaves out the write tools."""
+def build_tools(db, agent, run_id, read_only=False, write_tools=None):
+    """
+    name -> (description, input schema, handler(args) -> result). `read_only` leaves out the write tools;
+    `write_tools` (bare names) keeps only those of the agent's write tools.
+    """
     tools = {
         "find_prior_work": (
             "Everything already recorded about a host, domain, product, or URL fragment: assets, findings, endpoints, "
@@ -95,6 +98,8 @@ def build_tools(db, agent, run_id, read_only=False):
 
     for table in [] if read_only else OWNERSHIP[agent]:
         definition = WRITE_TABLES[table]
+        if write_tools is not None and definition["tool"] not in write_tools:
+            continue
         cols = definition["columns"]
         props = {col: schema_for(spec) for col, spec in cols.items()}
         props["supersedes"] = {"type": "integer", "description": "id of an earlier row in this table that this one corrects"}
@@ -121,11 +126,18 @@ def main():
 
     agent, db_file = arg("agent"), arg("db")
     if agent not in OWNERSHIP or not db_file:
-        print("usage: memory.py --agent <known agent id> --db <file> [--read-only]", file=sys.stderr)
+        print("usage: memory.py --agent <known agent id> --db <file> [--read-only] [--write-tools a,b]", file=sys.stderr)
         sys.exit(1)
 
     db = open_db(db_file)
-    tools = build_tools(db, agent, os.environ.get("EI_RUN_ID") or None, read_only="--read-only" in argv)
+    writes = arg("write-tools")
+    tools = build_tools(
+        db,
+        agent,
+        os.environ.get("EI_RUN_ID") or None,
+        read_only="--read-only" in argv,
+        write_tools=None if writes is None else [w for w in writes.split(",") if w],
+    )
     schemas = {n: {"description": d, "inputSchema": sch} for n, (d, sch, _) in tools.items()}
     serve(schemas, lambda name, args: tools[name][2](args), f"ei-memory:{agent}")
 

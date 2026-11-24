@@ -170,15 +170,25 @@ class Runner:
             raise ValueError("that run has no claude session to continue")
         return {**stored, "session_id": session_id}
 
+    def _stage_bound(self, run):
+        """A stage run, a run continuing one, or an Ask/explain fork of one: never continued as a plain run."""
+        ids = [i for i in (run["id"], run.get("parent_run_id")) if i]
+        marks = ",".join("?" * len(ids))
+        return bool(
+            self.db.get(f"SELECT 1 AS x FROM ops_stages WHERE run_id IN ({marks}) LIMIT 1", *ids)
+            or self.db.get("SELECT 1 AS x FROM gate_questions WHERE fork_run_id = ? LIMIT 1", run["id"])
+        )
+
     def start(self, body, link=None, stage=None):
         """
         link: {programId, snapshotId} resolved by the server from a confirmed snapshot — never taken from the request.
 
-        stage: {engagementId, stageId, stage, armed, tools, mcpAgents, fork} for a run that belongs to
+        stage: {engagementId, stageId, stage, armed, tools, mcpAgents, mcpWriteTools, fork} for a run that belongs to
         an engagement stage (set by the hub, never by the request). A stage run goes through the ei-gate:
         a PreToolUse hook (--settings, no other setting sources), the gate MCP server, the permission-prompt
         tool as a backstop, a pinned permission mode, and every gated tool left out of --allowedTools.
-        `tools`/`mcpAgents`, when given, replace the policy toolset and memory agents. The caller creates the
+        `tools`/`mcpAgents`, when given, replace the policy toolset and memory agents; `mcpWriteTools` (bare
+        names), when given, limits the memory servers to those write tools. The caller creates the
         ops_stages row (`stageId`); this records the run id on it and mirrors the run's final status.
         A fresh stage run's `task` is the complete prompt (hub/pipeline.py builds it) and is sent as-is; a
         stage run of Dann is never orchestrated (no --agent, no Agent tool).
@@ -186,8 +196,8 @@ class Runner:
         link = link or {}
         parent = self.resumable(body["continueRun"]) if body.get("continueRun") is not None else None
         task = body.get("task")
-        if parent and not stage and self.db.get("SELECT 1 AS x FROM ops_stages WHERE run_id = ? LIMIT 1", parent["id"]):
-            # A plain follow-up would inherit the stage's (possibly armed) toolset with no gate.
+        if parent and not stage and self._stage_bound(parent):
+            # A plain follow-up would inherit the stage's (possibly armed) toolset and session with no gate.
             raise ValueError("continue a stage run through its engagement")
         if parent:
             # A follow-up keeps its conversation's agent, scope, and authorization.
@@ -238,9 +248,17 @@ class Runner:
             memory_agents = [a for a in stage["mcpAgents"] if a in OWNERSHIP]
         shared = load_shared_server(self.repo_root)
         configs = self.data_dir / "run-configs"
-        mcp_tools = [t for a in memory_agents for t in qualified_tools_for(a)] + (SHARED_READ_TOOLS if shared else [])
+        writes = stage.get("mcpWriteTools") if stage else None  # bare names: only these memory write tools
+        if writes is None:
+            mcp_tools = [t for a in memory_agents for t in qualified_tools_for(a)]
+        else:
+            writes = list(writes)
+            mcp_tools = [f"mcp__{server_name(a)}__{t}" for a in memory_agents
+                         for t in tool_names_for(a)["read"] + [w for w in tool_names_for(a)["write"] if w in writes]]
+        mcp_tools += SHARED_READ_TOOLS if shared else []
         if stage:
-            mcp_config = write_mcp_config(configs, run_id, memory_agents, self.db_file, shared, gate=True, repo_root=self.repo_root)
+            mcp_config = write_mcp_config(configs, run_id, memory_agents, self.db_file, shared, gate=True, repo_root=self.repo_root,
+                                          write_tools=writes)
             gate_args = {
                 "unapproved": GATED_TOOLS,
                 "settings_path": write_gate_settings(configs, run_id, self.db_file, self.repo_root),

@@ -109,21 +109,28 @@ def _write_private(file, data):
     return file
 
 
-def write_mcp_config(directory, run_id, agents, db_file, shared=None, gate=False, repo_root=None, read_only=False):
+def write_mcp_config(directory, run_id, agents, db_file, shared=None, gate=False, repo_root=None, read_only=False, write_tools=None):
     """
     Write the per-run MCP config: one ei-memory instance per participating
     agent, each pinned to that agent's identity and this run's id, plus the
     shared knowledge base when given, plus the ei-gate server (pinned to this
-    run's id) when `gate` is set. `read_only` starts each memory server without its write tools.
+    run's id) when `gate` is set. `read_only` starts each memory server without
+    its write tools; `write_tools` (bare names) keeps only those write tools.
     """
     directory = _private_dir(directory)
     servers = {}
     if shared:
         servers[SHARED_SERVER] = shared
+    if read_only or write_tools is not None and not list(write_tools):
+        limit = ["--read-only"]
+    elif write_tools is not None:
+        limit = ["--write-tools", ",".join(write_tools)]
+    else:
+        limit = []
     for agent in agents:
         servers[server_name(agent)] = {
             "command": python_for_children(),
-            "args": [str(MEMORY_SERVER), "--agent", agent, "--db", str(db_file), *(["--read-only"] if read_only else [])],
+            "args": [str(MEMORY_SERVER), "--agent", agent, "--db", str(db_file), *limit],
             "env": {"EI_RUN_ID": run_id},
         }
     if gate:
