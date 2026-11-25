@@ -7,13 +7,16 @@ import PlanReview from "../components/engagement/PlanReview";
 import StageCard from "../components/engagement/StageCard";
 import StagePanel from "../components/engagement/StagePanel";
 import { useEngagement, useEngagementList } from "../hooks/useEngagement";
-import type { ConfirmedProgram, StageName } from "../types";
+import { pendingElsewhere } from "../engagement";
+import type { ConfirmedProgram, GateAction, StageName } from "../types";
 
 interface Props {
   programs: ConfirmedProgram[];
+  /** Every pending approval across engagements (what the tab badge counts). */
+  pendingAll: GateAction[];
 }
 
-export default function EngagementsPage({ programs }: Props) {
+export default function EngagementsPage({ programs, pendingAll }: Props) {
   const { list, error: listError, refresh: refreshList } = useEngagementList();
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [creating, setCreating] = useState(false);
@@ -26,6 +29,15 @@ export default function EngagementsPage({ programs }: Props) {
   const lane = detail?.stages.filter((s) => s.stage !== "research") ?? [];
   const research = detail?.stages.find((s) => s.stage === "research");
   const openStage = detail?.stages.find((s) => s.stage === open);
+  // The tab badge counts every engagement; the page shows one, so point at the others' waiting actions.
+  const elsewhere = pendingElsewhere(pendingAll, selectedId);
+  const elsewhereTotal = elsewhere.reduce((n, e) => n + e.count, 0);
+  const nameOf = (id: number) => list.find((e) => e.id === id)?.name ?? `engagement #${id}`;
+  const select = (id: number) => {
+    setSelectedId(id);
+    setCreating(false);
+    setOpen(null);
+  };
 
   return (
     <div className="engagements">
@@ -33,17 +45,32 @@ export default function EngagementsPage({ programs }: Props) {
         <EngagementList
           engagements={list}
           selectedId={selectedId}
-          onSelect={(id) => {
-            setSelectedId(id);
-            setCreating(false);
-            setOpen(null);
-          }}
+          onSelect={select}
           onNew={() => setCreating(true)}
         />
         {listError && <Banner tone="error">{listError}</Banner>}
       </Panel>
 
       <div className="engagements__main">
+        {elsewhereTotal > 0 && (
+          <Banner>
+            {elsewhereTotal} pending in other engagements:{" "}
+            {elsewhere.map((e, i) => (
+              <span key={e.engagementId}>
+                {i > 0 && ", "}
+                <a
+                  href="#engagements"
+                  onClick={(ev) => {
+                    ev.preventDefault();
+                    select(e.engagementId);
+                  }}
+                >
+                  {nameOf(e.engagementId)} ({e.count})
+                </a>
+              </span>
+            ))}
+          </Banner>
+        )}
         {creating ? (
           <Panel title="New engagement">
             <NewEngagementForm

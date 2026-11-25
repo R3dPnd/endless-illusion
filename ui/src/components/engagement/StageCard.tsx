@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Banner, Button, Checkbox, StatusBadge, TextInput } from "pnd-lib-react";
 import { skipStage, startStage, stopStage } from "../../api";
-import { stageButtons } from "../../engagement";
+import { stageButtons, startBody } from "../../engagement";
 import { useGuarded } from "../../hooks/useEngagement";
 import type { StageView } from "../../types";
 
@@ -25,9 +25,13 @@ export default function StageCard({ engagementId, stage, selected, onOpen, onCha
     await run(fn);
     onChanged();
   }
-  // Armed is only sent when the box is ticked and the stage can be armed.
-  const start = () =>
-    act(() => startStage(engagementId, stage.stage, { ...(armed ? { armed: true } : {}), ...(research ? { question: question.trim() } : {}) }));
+  // Armed is only sent when the box is ticked and the card offers arming; after any start (or failed start)
+  // the tick is cleared, so arming is a deliberate act every time.
+  const start = () => {
+    const body = startBody(armed, buttons, research, question);
+    setArmed(false);
+    return act(() => startStage(engagementId, stage.stage, body));
+  };
 
   const canStart = buttons.includes("start") || buttons.includes("rerun");
   return (

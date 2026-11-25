@@ -67,7 +67,7 @@ export default function NewEngagementForm({ programs, onCreated, onCancel }: Pro
         ) : (
           <Banner>No confirmed bounty programs yet. Confirm a program's scope on the Bounties tab first.</Banner>
         ))}
-      <TextField label="Scope hosts (one per line)" value={hosts} onChange={setHosts} rows={4} placeholder={"localhost:3000\n*.example.com"} />
+      <TextField label="Scope hosts (one per line)" value={hosts} onChange={setHosts} rows={4} placeholder={"127.0.0.1:3000\n*.example.com"} />
       <TextField label="Scope notes" value={notes} onChange={setNotes} rows={2} />
       <TextField label="Authorization" value={authorization} onChange={setAuthorization} rows={2} placeholder="operator-owned local lab" />
       {error && <Banner tone="error">{error}</Banner>}

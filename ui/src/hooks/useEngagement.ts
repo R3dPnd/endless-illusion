@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { getEngagement, getPendingGate, listEngagements, openRunStream } from "../api";
-import type { Engagement, EngagementDetail, RunEvent } from "../types";
+import type { Engagement, EngagementDetail, PendingGate, RunEvent } from "../types";
 
 const DETAIL_MS = 1000;
 const BADGE_MS = 2000;
@@ -63,13 +63,13 @@ export function useEngagementList() {
   return { list, error, refresh };
 }
 
-/** Pending-approval count for the tab badge, every 2 s. */
-export function usePendingCount(): number {
-  const [count, setCount] = useState(0);
+/** Every pending approval across engagements (the tab badge and the page's "pending elsewhere" banner), every 2 s. */
+export function usePendingGate(): PendingGate {
+  const [pending, setPending] = useState<PendingGate>({ count: 0, items: [] });
   usePoll(
     async () => {
       try {
-        setCount((await getPendingGate()).count);
+        setPending(await getPendingGate());
       } catch {
         /* the badge is best-effort; the page shows real errors */
       }
@@ -77,7 +77,7 @@ export function usePendingCount(): number {
     BADGE_MS,
     null
   );
-  return count;
+  return pending;
 }
 
 /** The live event feed of one stage run (replayed from the start by the hub's stream). */

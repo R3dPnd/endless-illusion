@@ -9,7 +9,7 @@ import ArchivePage from "./pages/ArchivePage";
 import BountiesPage from "./pages/BountiesPage";
 import ConsolePage from "./pages/ConsolePage";
 import EngagementsPage from "./pages/EngagementsPage";
-import { usePendingCount } from "./hooks/useEngagement";
+import { usePendingGate } from "./hooks/useEngagement";
 import { scoutTask, type DannSession } from "./bounties";
 import { speakerFor } from "./speakers";
 import type { Program } from "./types";
@@ -31,7 +31,8 @@ export default function App() {
   const [route, setRoute] = useHashRoute(ROUTES);
   const bounties = useBounties(run.busy);
   const [programId, setProgramId] = useState<number | null>(null);
-  const pendingApprovals = usePendingCount();
+  const pendingGate = usePendingGate();
+  const pendingApprovals = pendingGate.count;
   // The badge is the number of gated actions waiting on the operator, across engagements.
   const TABS = BASE_TABS.map((t) => (t.id === "engagements" && pendingApprovals > 0 ? { ...t, count: pendingApprovals } : t));
 
@@ -97,7 +98,7 @@ export default function App() {
       {agents.error && <Banner>Could not load agents: {agents.error}. Is the server running on :8787?</Banner>}
 
       <ErrorBoundary key={route} area={TABS.find((t) => t.id === route)?.label ?? "This tab"}>
-        {route === "engagements" && <EngagementsPage programs={bounties.data?.confirmed ?? []} />}
+        {route === "engagements" && <EngagementsPage programs={bounties.data?.confirmed ?? []} pendingAll={pendingGate.items} />}
         {route === "console" && (
           <ConsolePage agents={agents} run={run} programs={bounties.data?.confirmed ?? []} programId={programId} onProgramChange={setProgramId} />
         )}
