@@ -47,7 +47,10 @@ confirmed scope snapshot).
 - Approval of passive actions (option C, rejected). Reading, web searches and CVE lookups run
   freely inside an approved stage.
 - Multi-user use, remote approval (phone or Slack) and scheduling.
-- Replacing the Console's free-form single runs, which stay for ad-hoc work.
+- Replacing the Console's free-form single runs, which stay for ad-hoc work. (Ruling R13: a
+  Console run whose toolset has Write/Edit/MultiEdit/NotebookEdit gets a fail-closed
+  writes-only PreToolUse hook, `gate.py --hook --writes-only`, that confines those tools to
+  `<repo>/research/`, so no run outside the gate can rewrite the gate or the policies.)
 
 **Anti-goals** (failure even if everything technically works)
 - **Permission enforced only by the AI.** If any path lets an agent send target traffic, or start

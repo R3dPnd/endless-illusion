@@ -12,7 +12,7 @@ from hub import HUB_DIR
 from hub.db import now_iso, open_db
 from hub.db.archive import get_run
 from hub.db.pipeline import add_stage, create_engagement
-from hub.gate import hook_settings
+from hub.gate import hook_settings, writes_only_settings
 from hub.session import build_session_args, python_for_children
 from hub.tool_names import DECLARE_TOOL, PERMISSION_TOOL, SHARED_READ_TOOLS, qualified_tools_for
 
@@ -140,8 +140,33 @@ def test_stage_run_pins_permission_mode(api, fake):
     assert "--fork-session" not in argv
 
 
+def test_console_run_with_write_tools_gets_writes_only_hook(api, fake):
+    """R13: a plain Console run whose toolset has Write gets the writes-only hook (and only that)."""
+    hub, client = api
+    status, body = client.post("/api/runs", {"agent": "sen-of-saturday", "task": "x"})
+    assert status == 200
+    wait(hub, body["id"])
+    argv = argv_of(fake)
+    assert "Write" in at(argv, "--tools").split(",")
+    settings = Path(at(argv, "--settings"))
+    assert settings == hub.data_dir / "run-configs" / f"{body['id']}.settings.json"
+    assert json.loads(settings.read_text(encoding="utf8")) == writes_only_settings(
+        python_for_children(), str(HUB_DIR / "gate.py"), str(hub.repo_root))
+    if os.name != "nt":
+        assert stat.S_IMODE(settings.stat().st_mode) == 0o600
+    # Nothing else of the stage gate: Write stays pre-approved, no permission tool, no gate server, no pinned settings.
+    assert "Write" in at(argv, "--allowedTools").split(",")
+    for flag in ("--permission-prompt-tool", "--setting-sources", "--permission-mode"):
+        assert flag not in argv
+    assert "ei-gate" not in json.loads(Path(at(argv, "--mcp-config")).read_text(encoding="utf8"))["mcpServers"]
+    i = argv.index("--settings")
+    without = argv[:i] + argv[i + 2:]
+    assert "--settings" not in without and without[-2] == "--append-system-prompt"
+
+
 def test_plain_console_run_unchanged(api, fake):
-    """Byte-for-byte the argv a plain direct run produced before stage runs existed."""
+    """Byte-for-byte the argv a plain direct run WITHOUT write tools produced before stage runs existed
+    (a run with Write/Edit/MultiEdit/NotebookEdit adds only `--settings`: see the test above)."""
     hub, client = api
     status, body = client.post("/api/runs", {"agent": "sin-of-friday", "task": "x"})
     assert status == 200

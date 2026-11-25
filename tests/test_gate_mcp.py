@@ -329,3 +329,68 @@ def test_hook_sigterm_during_wait_expires_pending(env):
     assert "GateSignal" in spec["permissionDecisionReason"]
     statuses = [r["status"] for r in db.all("SELECT status FROM gate_actions WHERE run_id = ? ORDER BY id", RUN)]
     assert "pending" not in statuses and "expired" in statuses
+
+
+# ---- R13 / I4: the writes-only hook for non-stage runs ----
+
+
+def writes_only_cmd(root, python=sys.executable):
+    from hub.gate import writes_only_settings
+
+    s = writes_only_settings(python, str(GATE), str(root))
+    (entry,) = s["hooks"]["PreToolUse"]
+    assert entry["matcher"] == "Write|Edit|MultiEdit|NotebookEdit"
+    return entry["hooks"][0]["command"]
+
+
+def tool_input(tool, path):
+    key = "notebook_path" if tool == "NotebookEdit" else "file_path"
+    return json.dumps({"hook_event_name": "PreToolUse", "tool_name": tool, "tool_input": {key: path, "content": "x"}})
+
+
+def test_writes_only_settings_shape():
+    from hub.gate import writes_only_settings
+
+    py, gate, _, root = NASTY
+    (entry,) = writes_only_settings(py, gate, root)["hooks"]["PreToolUse"]
+    (hook,) = entry["hooks"]
+    outer = shlex.split(hook["command"])
+    assert outer[:2] == ["/bin/sh", "-c"] and len(outer) == 3
+    inner = shlex.split(outer[2])
+    assert inner[:6] == [py, gate, "--hook", "--writes-only", "--repo-root", root]
+    assert inner[6] == "||" and "--db" not in inner
+
+
+def test_writes_only_hook_confines_writes_to_research(tmp_path):
+    """A real subprocess run of the exact settings command: hub/gate.py is denied, research/x.md allowed."""
+    root = HUB_DIR.parent
+    cmd = writes_only_cmd(root)
+    environ = {k: v for k, v in os.environ.items() if k != "EI_RUN_ID"}  # no run id and no DB needed
+
+    def hook(stdin):
+        return decision(subprocess.run(cmd, shell=True, input=stdin, capture_output=True, text=True, env=environ, timeout=30))
+
+    for tool in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        assert hook(tool_input(tool, str(root / "hub" / "gate.py")))[0] == "deny", tool
+        assert hook(tool_input(tool, str(root / "agents" / "sen-of-saturday.policy.json")))[0] == "deny", tool
+        assert hook(tool_input(tool, str(root / "research" / "x.md")))[0] == "allow", tool
+    for path in ("research/x.md", str(root / "research" / ".." / "hub" / "gate.py"), str(root / "research"), "", "~/x"):
+        assert hook(tool_input("Write", path))[0] == "deny", path
+    assert hook(json.dumps({"tool_name": "Read", "tool_input": {"file_path": "/etc/passwd"}}))[0] == "allow"
+    for garbage in ("not json", "", "[1]", '{"tool_name": "Write"}', '{"tool_name": "Write", "tool_input": {"file_path": 5}}'):
+        assert hook(garbage)[0] == "deny", garbage
+
+
+def test_writes_only_symlink_out_of_research_denied(tmp_path):
+    (tmp_path / "research").mkdir()
+    (tmp_path / "research" / "link").symlink_to(tmp_path / "hub", target_is_directory=True)
+    cmd = writes_only_cmd(tmp_path)
+    res = subprocess.run(cmd, shell=True, input=tool_input("Write", str(tmp_path / "research" / "link" / "gate.py")),
+                         capture_output=True, text=True, timeout=30)
+    assert decision(res)[0] == "deny"
+
+
+def test_writes_only_wrapper_blocks_on_bad_interpreter(tmp_path):
+    res = subprocess.run(writes_only_cmd(tmp_path, python="/no/such/python"), shell=True,
+                         input=tool_input("Write", str(tmp_path / "research" / "x.md")), capture_output=True, text=True, timeout=30)
+    assert res.returncode == 2

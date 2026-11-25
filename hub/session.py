@@ -5,7 +5,7 @@ from pathlib import Path
 
 from . import HUB_DIR
 from .db.ownership import server_name
-from .gate import hook_settings
+from .gate import hook_settings, writes_only_settings
 from .tool_names import GATE_SERVER, SHARED_SERVER
 
 MEMORY_SERVER = HUB_DIR / "memory.py"
@@ -34,7 +34,8 @@ def build_session_args(
     `--allowedTools`, so every call reaches the gate), `settings_path` (the gate
     hook), `setting_sources` ("" = no user/project/local settings), a pinned
     `permission_mode`, and `permission_tool` as a backstop. `fork` forks the
-    resumed session. With every one left at its default, the argv is exactly a
+    resumed session. A non-stage run with a write tool passes only
+    `settings_path` (the writes-only hook, Ruling R13). With every one left at its default, the argv is exactly a
     plain run's.
 
     Note: `--setting-sources ""` also drops user-level settings (`env`,
@@ -148,4 +149,12 @@ def write_gate_settings(directory, run_id, db_file, repo_root):
     """Write the per-run `--settings` file that installs the gate's PreToolUse hook (0600)."""
     directory = _private_dir(directory)
     settings = hook_settings(python_for_children(), str(GATE_SERVER_PY), str(db_file), str(repo_root))
+    return _write_private(directory / f"{run_id}.settings.json", settings)
+
+
+def write_writes_only_settings(directory, run_id, repo_root):
+    """Write the per-run `--settings` file for a non-stage run with a write tool (Ruling R13):
+    the writes-only hook confines its writes to `<repo_root>/research/` (0600)."""
+    directory = _private_dir(directory)
+    settings = writes_only_settings(python_for_children(), str(GATE_SERVER_PY), str(repo_root))
     return _write_private(directory / f"{run_id}.settings.json", settings)

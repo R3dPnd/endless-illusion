@@ -13,11 +13,11 @@ from pathlib import Path
 from .db.archive import add_report, append_event, create_run, find_session_id, finish_run, get_run
 from .db.ownership import AGENTS, OWNERSHIP, server_name
 from .db.pipeline import add_stage, set_stage_status
-from .gate_service import GATED_TOOLS, cancel_for_run
+from .gate_service import GATED_TOOLS, WRITE_PATH_KEYS, cancel_for_run
 from .policies import get_policy, load_policies
 from .prompt import build_followup_prompt, build_prompt
 from .report import DELEGATE_TOOLS, HANDBACK_TOOLS, clean_report, result_text
-from .session import build_session_args, load_shared_server, write_gate_settings, write_mcp_config
+from .session import build_session_args, load_shared_server, write_gate_settings, write_mcp_config, write_writes_only_settings
 from .tool_names import DECLARE_TOOL, PERMISSION_TOOL, SHARED_READ_TOOLS, qualified_tools_for, tool_names_for
 
 ORCHESTRATOR = "dann-of-thursday"
@@ -271,6 +271,10 @@ class Runner:
         else:
             mcp_config = write_mcp_config(configs, run_id, memory_agents, self.db_file, shared) if memory_agents or shared else None
             gate_args = {}
+            if set(tools) & set(WRITE_PATH_KEYS):
+                # R13: a non-stage run may write only under research/ (the writes-only hook). Otherwise it
+                # could rewrite hub/gate*.py or agents/*.policy.json, which the next stage run executes.
+                gate_args["settings_path"] = write_writes_only_settings(configs, run_id, self.repo_root)
         args = build_session_args(
             tools,
             mcp_config_path=mcp_config,

@@ -16,6 +16,13 @@ Two modes, both deciding through hub/gate_service.py (the hub decides, not a pro
         hookSpecificOutput decision on stdout, exits 0. This is the primary gate:
         it also sees calls Claude Code would auto-allow.
 
+    python hub/gate.py --hook --writes-only --repo-root <dir>
+        Write-confinement PreToolUse hook for every NON-stage run whose toolset has
+        Write/Edit/MultiEdit/NotebookEdit (Ruling R13; Console runs included): those tools
+        may only write absolute paths resolving under <dir>/research/, anything else is
+        auto-denied, every other tool is allowed. No DB, no run id, no operator. Fails
+        closed exactly like the full hook. Use `writes_only_settings` for its `--settings`.
+
 Claude Code treats a hook that crashes, exits 1, times out or prints anything but a
 decision as "allow" (spec §4). So the hook mode FAILS CLOSED: every error, including
 bad stdin, a missing EI_RUN_ID and an unreachable DB, prints a deny decision; if even
@@ -32,6 +39,7 @@ import os
 import shlex
 import signal
 import sys
+from pathlib import Path
 
 if __package__ in (None, ""):
     # Run as a script by claude: make the `hub` package importable.
@@ -39,6 +47,8 @@ if __package__ in (None, ""):
 
 SERVER_NAME = "ei-gate"  # == hub.tool_names.GATE_SERVER (not imported: the hook imports as little as possible up front)
 HOOK_MATCHER = "Bash|WebFetch|Write|Edit|MultiEdit|NotebookEdit"
+WRITES_MATCHER = "Write|Edit|MultiEdit|NotebookEdit"  # the writes-only hook (== gate_service.WRITE_PATH_KEYS)
+WRITES_TIMEOUT = 60  # the writes-only hook never waits on anyone
 HOOK_TIMEOUT = 86400  # seconds, Claude Code's hook timeout
 HOOK_WAIT = 86000  # our own deadline, strictly below HOOK_TIMEOUT: Claude Code's timeout fails open
 GATE_WAIT = HOOK_WAIT  # the MCP permission tool's wait is bounded the same way (expiry = deny)
@@ -75,9 +85,15 @@ TOOLS = {
 def _parse_args(argv):
     parser = argparse.ArgumentParser(prog="gate.py")
     parser.add_argument("--hook", action="store_true")
-    parser.add_argument("--db", required=True)
+    parser.add_argument("--writes-only", action="store_true")
+    parser.add_argument("--db")
     parser.add_argument("--repo-root", required=True)
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.writes_only and not args.hook:
+        parser.error("--writes-only is a hook mode (use it with --hook)")
+    if not args.writes_only and not args.db:
+        parser.error("--db is required")
+    return args
 
 
 def _normalize(reply) -> dict:
@@ -138,6 +154,22 @@ def _raise_on_signal(signum, _frame):
     raise GateSignal(f"signal {signum}")
 
 
+def writes_only_decision(tool_name, tool_input, repo_root) -> dict:
+    """The writes-only hook's decision (no DB, no run): a write tool may only write an absolute
+    path resolving strictly under `<repo_root>/research/`; every other tool is allowed."""
+    from hub.gate_rules import _abs_resolved
+    from hub.gate_service import WRITE_PATH_KEYS
+
+    if tool_name not in WRITE_PATH_KEYS:
+        return {"behavior": "allow", "message": ""}
+    path = tool_input.get(WRITE_PATH_KEYS[tool_name])
+    research = (Path(repo_root) / "research").resolve()
+    resolved = _abs_resolved(path) if isinstance(path, str) else None
+    if resolved is not None and resolved != research and resolved.is_relative_to(research):
+        return {"behavior": "allow", "message": ""}
+    return {"behavior": "deny", "message": f"writes are limited to {research}/ (absolute paths)"}
+
+
 def _hook_decide(argv) -> dict:
     args = _parse_args(argv)
     payload = json.loads(sys.stdin.read())
@@ -146,6 +178,8 @@ def _hook_decide(argv) -> dict:
     tool_name, tool_input = payload.get("tool_name"), payload.get("tool_input")
     if not isinstance(tool_name, str) or not tool_name or not isinstance(tool_input, dict):
         raise ValueError("hook input needs tool_name and tool_input")
+    if args.writes_only:
+        return writes_only_decision(tool_name, tool_input, args.repo_root)
 
     from hub.db import open_db
     from hub.gate_service import check_permission, context_for_run, wait_for_decision
@@ -201,26 +235,31 @@ def hook_main(argv) -> None:
     os._exit(0)  # immediately after the flush: no teardown that could print or change the exit code
 
 
-def hook_settings(python: str, gate_py: str, db_file: str, repo_root: str) -> dict:
-    """The `--settings` JSON that installs the gate as the PreToolUse hook.
-
-    The command is a `/bin/sh -c` wrapper: any non-zero exit of the hook (missing
-    interpreter, import error, crash) becomes exit 2, which blocks the call."""
+def _settings(matcher: str, command: str, timeout: int) -> dict:
+    """One fail-closed PreToolUse hook: a `/bin/sh -c` wrapper turns any non-zero exit of
+    `command` (missing interpreter, import error, crash) into exit 2, which blocks the call."""
     q = shlex.quote
-    inner = (
-        f"{q(python)} {q(gate_py)} --hook --db {q(db_file)} --repo-root {q(repo_root)}"
-        ' || { rc=$?; echo "ei-gate: the gate hook failed (exit $rc); blocking the call" >&2; exit 2; }'
-    )
+    inner = command + ' || { rc=$?; echo "ei-gate: the gate hook failed (exit $rc); blocking the call" >&2; exit 2; }'
     return {
         "hooks": {
             "PreToolUse": [
-                {
-                    "matcher": HOOK_MATCHER,
-                    "hooks": [{"type": "command", "command": f"/bin/sh -c {q(inner)}", "timeout": HOOK_TIMEOUT}],
-                }
+                {"matcher": matcher, "hooks": [{"type": "command", "command": f"/bin/sh -c {q(inner)}", "timeout": timeout}]}
             ]
         }
     }
+
+
+def hook_settings(python: str, gate_py: str, db_file: str, repo_root: str) -> dict:
+    """The `--settings` JSON that installs the gate as the PreToolUse hook of a stage run."""
+    q = shlex.quote
+    return _settings(HOOK_MATCHER, f"{q(python)} {q(gate_py)} --hook --db {q(db_file)} --repo-root {q(repo_root)}", HOOK_TIMEOUT)
+
+
+def writes_only_settings(python: str, gate_py: str, repo_root: str) -> dict:
+    """The `--settings` JSON for a non-stage run with a write tool (Ruling R13): the writes-only
+    hook confines Write/Edit/MultiEdit/NotebookEdit to `<repo_root>/research/`. No DB, no operator."""
+    q = shlex.quote
+    return _settings(WRITES_MATCHER, f"{q(python)} {q(gate_py)} --hook --writes-only --repo-root {q(repo_root)}", WRITES_TIMEOUT)
 
 
 def main():
