@@ -56,6 +56,15 @@ export function startBody(armed: boolean, buttons: StageButton[], research: bool
   return { ...(armed && buttons.includes("arm") ? { armed: true as const } : {}), ...(research ? { question: question.trim() } : {}) };
 }
 
+/** The engagement body's scopeHosts: typed lines for a lab; none for a bounty (the hub derives them from the confirmed snapshot). */
+export function newEngagementHosts(kind: "lab" | "bounty", typed: string): string[] {
+  if (kind === "bounty") return [];
+  return typed
+    .split("\n")
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
 /** Pending approvals of engagements other than the selected one, per engagement (in first-seen order). */
 export function pendingElsewhere(items: GateAction[], selectedId: number | null): { engagementId: number; count: number }[] {
   const counts = new Map<number, number>();

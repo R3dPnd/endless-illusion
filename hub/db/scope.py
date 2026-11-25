@@ -15,6 +15,9 @@ stored JSON is left as the agent wrote it.
 """
 
 import json
+import re
+import time
+from datetime import datetime
 
 _KNOWN = ("asset", "type", "notes")
 _ASSET_KEYS = ("asset", "host", "target", "name", "url", "domain", "pattern")
@@ -91,3 +94,74 @@ def exclusion_lines(value):
         return lines
     entries = value if isinstance(value, list) else [value]
     return [t for t in (_text(e) for e in entries) if t]
+
+
+# ---- engagement scope from a confirmed snapshot (I1) ----
+
+STALE_MS = 30 * 24 * 60 * 60 * 1000  # a snapshot older than this must be re-confirmed before arming
+
+# Scope items whose type says they are not network hosts (app-store ids look like DNS names).
+_NON_HOST_TYPES = ("android", "ios", "mobile", "app store", "apk", "ipa", "executable", "binary", "hardware",
+                   "source", "desktop", "firmware")
+_HOST_RE = re.compile(
+    r"^(?:\*\.)?(?:[a-z0-9_](?:[a-z0-9_\-]{0,61}[a-z0-9_])?\.)+[a-z]{2,63}(?::\d{1,5})?$"
+    r"|^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$"
+    r"|^\[[0-9a-f:.]+\](?::\d{1,5})?$"
+)
+
+
+def asset_hosts(text):
+    """Every host-shaped token of a scope asset or exclusion line, as `host`, `host:port` or
+    `*.domain` (lowercase; scheme, userinfo and path dropped). `*` and `*.<tld>` are too broad
+    and are dropped; anything else that is not plainly a host (prose, app ids) is ignored."""
+    out = []
+    for tok in re.split(r"[\s,;()<>\"'`]+", (text or "").lower()):
+        tok = re.sub(r"^[a-z][a-z0-9+.\-]*://", "", tok)
+        tok = re.split(r"[/?#\\]", tok, maxsplit=1)[0].rsplit("@", 1)[-1].strip(".:")
+        if not tok or not _HOST_RE.match(tok):
+            continue
+        if tok.startswith("*.") and "." not in tok[2:].split(":")[0]:
+            continue
+        if tok not in out:
+            out.append(tok)
+    return out
+
+
+def _item_hosts(items):
+    out = []
+    for item in items:
+        if any(t in (item.get("type") or "").lower() for t in _NON_HOST_TYPES):
+            continue
+        for h in asset_hosts(item.get("asset")):
+            if h not in out:
+                out.append(h)
+    return out
+
+
+def _json(value, default):
+    try:
+        return json.loads(value) if value else default
+    except ValueError:
+        return default
+
+
+def snapshot_scope(db, snapshot_id, now_ms=None):
+    """{in, out, stale, snapshot_id} for one confirmed snapshot. `in`: hosts of its in_scope
+    assets; `out`: hosts of its out_of_scope assets and every host named in its exclusions
+    (always out, even if in_scope also matches them); `stale`: confirmed over 30 days ago."""
+    snap = db.get("SELECT * FROM scope_snapshots WHERE id = ?", snapshot_id) if snapshot_id is not None else None
+    if snap is None:
+        return {"in": [], "out": [], "stale": False, "snapshot_id": None}
+    out = _item_hosts(scope_items(_json(snap["out_of_scope"], [])))
+    for line in exclusion_lines(_json(snap["exclusions"], [])):
+        for h in asset_hosts(line):
+            if h not in out:
+                out.append(h)
+    now_ms = now_ms if now_ms is not None else time.time() * 1000
+    confirmed = datetime.fromisoformat(snap["confirmed_at"].replace("Z", "+00:00")).timestamp() * 1000
+    return {
+        "in": _item_hosts(scope_items(_json(snap["in_scope"], []))),
+        "out": out,
+        "stale": now_ms - confirmed > STALE_MS,
+        "snapshot_id": snap["id"],
+    }

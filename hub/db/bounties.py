@@ -10,7 +10,7 @@ from datetime import datetime
 from . import now_iso
 from .read import LEAD_JSON_COLUMNS, lead_profile, list_programs, parse_json
 from .redact import clip, redact
-from .scope import exclusion_lines, scope_items
+from .scope import STALE_MS, exclusion_lines, scope_items, snapshot_scope
 from .url import normalize_url
 
 
@@ -20,7 +20,7 @@ class HttpError(Exception):
         self.status = status
 
 
-STALE_MS = 30 * 24 * 60 * 60 * 1000
+# STALE_MS lives in scope.py (re-exported here): arming a bounty stage checks it too.
 
 
 def _blank(s):
@@ -213,6 +213,7 @@ def list_bounties(db, now=None):
                     "inScope": p["scope"]["in_scope"],
                     "outOfScope": p["scope"]["out_of_scope"],
                     "exclusions": p["scope"]["exclusions"],
+                    "scopeHosts": snapshot_scope(db, p["scope"]["id"])["in"],  # what a bounty engagement gets
                     "confirmedAt": p["scope"]["confirmed_at"],
                     "stale": now - _epoch_ms(p["scope"]["confirmed_at"]) > STALE_MS,
                 },

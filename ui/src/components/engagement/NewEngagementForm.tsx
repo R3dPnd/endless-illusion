@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Banner, Button, Segmented, TextField, TextInput } from "pnd-lib-react";
 import { createEngagement } from "../../api";
+import { newEngagementHosts } from "../../engagement";
 import { useGuarded } from "../../hooks/useEngagement";
 import ProgramPicker from "../run/ProgramPicker";
 import type { ConfirmedProgram, Engagement } from "../../types";
@@ -11,12 +12,7 @@ interface Props {
   onCancel: () => void;
 }
 
-/** Scope hosts are typed one per line. */
-const hostLines = (text: string) =>
-  text
-    .split("\n")
-    .map((l) => l.trim())
-    .filter(Boolean);
+// A lab's scope hosts are typed one per line; a bounty's come from the confirmed snapshot (shown read-only).
 
 export default function NewEngagementForm({ programs, onCreated, onCancel }: Props) {
   const [name, setName] = useState("");
@@ -27,14 +23,15 @@ export default function NewEngagementForm({ programs, onCreated, onCancel }: Pro
   const [programId, setProgramId] = useState<number | null>(null);
   const { error, busy, run } = useGuarded();
 
-  const ready = name.trim() && (kind === "lab" || programId != null);
+  const picked = kind === "bounty" ? programs.find((p) => p.id === programId) : undefined;
+  const ready = name.trim() && (kind === "lab" || (picked != null && picked.snapshot.scopeHosts.length > 0));
 
   async function submit() {
     const created = await run(() =>
       createEngagement({
         name: name.trim(),
         kind,
-        scopeHosts: hostLines(hosts),
+        scopeHosts: newEngagementHosts(kind, hosts),
         scopeNotes: notes,
         authorization,
         ...(kind === "bounty" && programId != null ? { programId } : {}),
@@ -67,7 +64,27 @@ export default function NewEngagementForm({ programs, onCreated, onCancel }: Pro
         ) : (
           <Banner>No confirmed bounty programs yet. Confirm a program's scope on the Bounties tab first.</Banner>
         ))}
-      <TextField label="Scope hosts (one per line)" value={hosts} onChange={setHosts} rows={4} placeholder={"127.0.0.1:3000\n*.example.com"} />
+      {kind === "lab" ? (
+        <TextField label="Scope hosts (one per line)" value={hosts} onChange={setHosts} rows={4} placeholder={"127.0.0.1:3000\n*.example.com"} />
+      ) : (
+        picked && (
+          <div className="eng-form__derived">
+            <strong>Scope hosts (from the confirmed scope snapshot, read-only)</strong>
+            {picked.snapshot.scopeHosts.length > 0 ? (
+              <ul>
+                {picked.snapshot.scopeHosts.map((h) => (
+                  <li key={h}>
+                    <code>{h}</code>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <Banner tone="error">This program's confirmed scope names no in-scope host; it can't be an engagement.</Banner>
+            )}
+            {picked.snapshot.stale && <p className="gate-warn">The snapshot is over 30 days old: stages can't be armed until the scope is re-confirmed.</p>}
+          </div>
+        )
+      )}
       <TextField label="Scope notes" value={notes} onChange={setNotes} rows={2} />
       <TextField label="Authorization" value={authorization} onChange={setAuthorization} rows={2} placeholder="operator-owned local lab" />
       {error && <Banner tone="error">{error}</Banner>}

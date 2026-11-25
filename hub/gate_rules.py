@@ -406,7 +406,18 @@ def _host_matches(host: str, port: str | None, entry: tuple[str, str | None]) ->
     return host == ehost
 
 
-def scope_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str]) -> str:
+def excluded(hosts: list[str], out_hosts: list[str]) -> bool:
+    """True if any host matches an out-of-scope / excluded entry, ports ignored (a bounty
+    snapshot's out_of_scope and exclusions; Important 1)."""
+    entries = [(e[0], None) for e in (_norm_entry(s) for s in out_hosts or () if s and s.strip()) if e]
+    for h in hosts:
+        n = _norm_entry(h)
+        if n is not None and any(_host_matches(n[0], None, e) for e in entries):
+            return True
+    return False
+
+
+def scope_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str], out_hosts: list[str] = ()) -> str:
     """`"unknown"` | `"none"` | `"out"` | `"in"` for hosts against scope entries.
 
     Both sides are normalised (lowercase, trimmed, trailing dot dropped; scope
@@ -414,8 +425,12 @@ def scope_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str]) -> s
     subdomains only (not the apex).  A scope entry with a port matches only that
     port; one without matches any port.  A host *without* an explicit port only
     matches scope entries *without* a port (scheme-default ports are not
-    guessed).  Any unparseable host is `out`.
+    guessed).  Any unparseable host is `out`.  A host matching `out_hosts` (see
+    `excluded`) makes the verdict `out` whatever else holds -- even when the text is
+    indirect, and even when an in-scope entry also matches it.
     """
+    if excluded(hosts, out_hosts):
+        return "out"
     if indirect:
         return "unknown"
     if not hosts:
@@ -472,14 +487,19 @@ def _related(host: str, scope_host: str) -> bool:
     return host == base or host.endswith("." + base) or base.endswith("." + host)
 
 
-def fetch_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str]) -> str:
-    """`"in"` | `"out"` | `"unknown"` for a WebFetch URL (Ruling R14).
+def fetch_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str], out_hosts: list[str] = ()) -> str:
+    """`"in"` | `"out"` | `"unknown"` | `"excluded"` for a WebFetch URL (Ruling R14).
+
+    `"excluded"`: a host matches `out_hosts` (the program's out-of-scope / exclusions);
+    the gate denies it outright (recorded as `out`), it is never auto-allowed.
 
     `"out"` -- the only verdict the gate auto-allows for WebFetch -- needs every
     host to be a `plain_dns_name` that matches no scope entry even ignoring ports
     and is neither a parent nor a subdomain of a scope host.  An exact in-scope
     URL is `"in"`; everything else (aliases, IPs, port-only mismatches, no host,
     indirection) is `"unknown"`: gated, and approving it needs scopeAck."""
+    if excluded(hosts, out_hosts):
+        return "excluded"
     verdict = scope_verdict(hosts, indirect, scope_hosts)
     if verdict in ("in", "unknown"):
         return verdict

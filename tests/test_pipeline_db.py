@@ -42,7 +42,7 @@ def test_bounty_requires_confirmed_snapshot(db):
         create_engagement(db, "Bounty", "bounty", [], "", "", program_id=pid)
     sid, _ = db.run(
         "INSERT INTO scope_snapshots (program_id, in_scope, out_of_scope, exclusions, confirmed_at) VALUES (?,?,?,?,?)",
-        pid, "[]", "[]", "[]", now_iso(),
+        pid, '[{"asset": "app.p.example"}]', "[]", "[]", now_iso(),
     )
     assert create_engagement(db, "Bounty", "bounty", [], "", "", program_id=pid)["snapshot_id"] == sid
 

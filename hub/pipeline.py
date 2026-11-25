@@ -16,6 +16,7 @@ from pathlib import Path
 
 from .db import now_iso
 from .db.pipeline import add_stage, approved_plan, get_engagement, set_stage_status
+from .db.scope import snapshot_scope
 from .policies import get_policy
 from .prompt import build_stage_prompt, data_block
 
@@ -209,7 +210,7 @@ def _stage_or_raise(stage):
     return STAGES[stage]
 
 
-def _check_arming(eng, stage, armed):
+def _check_arming(eng, stage, armed, db=None):
     if not armed:
         return
     if not STAGES[stage]["can_arm"]:
@@ -218,6 +219,8 @@ def _check_arming(eng, stage, armed):
         raise ValueError("arming needs the engagement's authorization basis")
     if eng["kind"] == "bounty" and not eng["snapshot_id"]:
         raise ValueError("arming a bounty engagement needs its confirmed scope snapshot")
+    if eng["kind"] == "bounty" and (db is None or snapshot_scope(db, eng["snapshot_id"])["stale"]):
+        raise ValueError("the program's confirmed scope snapshot is stale (over 30 days); re-confirm the scope before arming")
 
 
 def _toolset(hub, stage, armed):
@@ -323,7 +326,7 @@ def start_stage(hub, engagement_id, stage, armed=False, question=None):
     eng = _engagement_or_raise(hub.db, engagement_id)
     spec = _stage_or_raise(stage)
     armed = armed is True  # only a real boolean true arms
-    _check_arming(eng, stage, armed)
+    _check_arming(eng, stage, armed, hub.db)
     if stage == "research":
         if not isinstance(question, str) or not question.strip():
             raise ValueError("a research stage needs a question")
@@ -373,7 +376,7 @@ def continue_stage(hub, engagement_id, stage, message):
             raise ValueError(f"the {stage} stage has no run to continue")
         prev = rows[-1]
         armed = bool(prev["armed"])
-        _check_arming(eng, stage, armed)
+        _check_arming(eng, stage, armed, hub.db)
         return _launch(hub, eng, stage, armed, prev["question"], {"continueRun": prev["run_id"], "task": message.strip()})
 
 

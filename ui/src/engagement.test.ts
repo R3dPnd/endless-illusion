@@ -90,3 +90,12 @@ describe("pendingElsewhere (M4)", () => {
     expect(pendingElsewhere([a(1, 1)], null)).toEqual([{ engagementId: 1, count: 1 }]);
   });
 });
+
+import { newEngagementHosts } from "./engagement";
+
+describe("newEngagementHosts (I1)", () => {
+  it("sends typed lines for a lab and nothing for a bounty (the hub derives those)", () => {
+    expect(newEngagementHosts("lab", " 127.0.0.1:3000 \n\n*.x.com")).toEqual(["127.0.0.1:3000", "*.x.com"]);
+    expect(newEngagementHosts("bounty", "evil.com")).toEqual([]);
+  });
+});

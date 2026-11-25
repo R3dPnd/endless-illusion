@@ -77,7 +77,11 @@ confirmed scope snapshot).
   new tables that agents cannot write.
 - **Scope authority.** For a bounty engagement, scope comes from the operator-confirmed snapshot
   (`scope_snapshots`), never from the request. For a lab engagement, the operator enters scope
-  hosts when creating it.
+  hosts when creating it. (Final review I1: a bounty engagement's scope hosts are derived from the
+  snapshot's in_scope assets, `hub/db/scope.py` `snapshot_scope`; operator hosts may only narrow
+  them. Hosts named by the snapshot's out_of_scope or exclusions are always `out` at the gate, even
+  if in_scope matches them, and a WebFetch to one is denied. A stale snapshot, over 30 days, cannot
+  arm a stage.)
 - **Litestream** replicates the DB to R2. Nothing here needs special handling for it.
 - **Platform:** macOS. Docker is not installed and Node is, so Juice Shop runs from npm or its
   release package.
@@ -240,7 +244,7 @@ against a stdio MCP spike server exposing one tool, `permission`:
   `authorized_active` toolset, which is what gives it Bash.
   - **Web and API:** each stage's Start control carries an **Arm** checkbox. It can only be
     ticked when the engagement has an authorization basis, plus a confirmed scope snapshot for
-    a bounty engagement.
+    a bounty engagement whose snapshot is not stale (over 30 days).
   - **Discovery:** starts passive. It can be armed separately, which is active scanning, under
     the same conditions.
   - **Planning, Analysis and Reporting:** never arm.

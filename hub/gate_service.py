@@ -31,11 +31,13 @@ from pathlib import Path
 from typing import Callable
 
 from .db import now_iso
+from .db.scope import snapshot_scope
 from .gate_rules import classify_bash, classify_write, extract_hosts, fetch_verdict, scope_verdict
 
 DECLARE_FIRST = "call declare_action with why, technique and risk first"
 OPERATOR_DENIED = "operator denied"
 CANCELLED = "action was cancelled"
+EXCLUDED = "that host is out of scope or excluded by the program's confirmed scope"
 
 WRITE_PATH_KEYS = {"Write": "file_path", "Edit": "file_path", "MultiEdit": "file_path", "NotebookEdit": "notebook_path"}
 GATED_TOOLS = frozenset({"Bash", "WebFetch", *WRITE_PATH_KEYS})
@@ -57,6 +59,7 @@ class RunContext:
     slug: str
     scope_hosts: list[str]
     workdir: Path
+    out_hosts: tuple[str, ...] = ()  # bounty: the snapshot's out_of_scope + exclusions, always "out"
 
 
 def _allow(message: str = "") -> dict:
@@ -75,7 +78,7 @@ def context_for_run(db, run_id, repo_root: Path) -> RunContext | None:
     if not isinstance(run_id, str) or not run_id:
         return None
     row = db.get(
-        "SELECT s.engagement_id, s.stage, s.status, e.slug, e.scope_hosts FROM ops_stages s"
+        "SELECT s.engagement_id, s.stage, s.status, e.slug, e.scope_hosts, e.kind, e.snapshot_id FROM ops_stages s"
         " JOIN ops_engagements e ON e.id = s.engagement_id WHERE s.run_id = ? ORDER BY s.id DESC LIMIT 1",
         run_id,
     )
@@ -88,7 +91,8 @@ def context_for_run(db, run_id, repo_root: Path) -> RunContext | None:
     if not isinstance(hosts, list):
         return None
     workdir = (Path(repo_root) / "research" / row["slug"]).resolve()
-    return RunContext(run_id, row["engagement_id"], row["stage"], row["slug"], [h for h in hosts if isinstance(h, str)], workdir)
+    out_hosts = tuple(snapshot_scope(db, row["snapshot_id"])["out"]) if row["kind"] == "bounty" else ()
+    return RunContext(run_id, row["engagement_id"], row["stage"], row["slug"], [h for h in hosts if isinstance(h, str)], workdir, out_hosts)
 
 
 def _filled(v) -> bool:
@@ -176,7 +180,7 @@ def _decide_call(db, ctx, tool_name, tool_input, set_pending) -> dict | None:
             _record(db, ctx, tool_name, tool_input, "auto_allowed", "none")
             return _allow()
         hosts, indirect = extract_hosts(target, strict=True, workdir=ctx.workdir)
-        verdict = scope_verdict(hosts, indirect, ctx.scope_hosts)
+        verdict = scope_verdict(hosts, indirect, ctx.scope_hosts, ctx.out_hosts)
         if verdict == "none":  # R8: "no host found" is not "no target"
             verdict = "unknown"
     elif tool_name == "WebFetch":
@@ -187,7 +191,10 @@ def _decide_call(db, ctx, tool_name, tool_input, set_pending) -> dict | None:
         hosts, indirect = extract_hosts(target, strict=False)
         # R14: only a plain public DNS name unrelated to every scope host is free research reading.
         # Aliases (IPs, localhost, wildcard DNS) and port-only mismatches come back "unknown": gated.
-        verdict = fetch_verdict(hosts, indirect, ctx.scope_hosts)
+        verdict = fetch_verdict(hosts, indirect, ctx.scope_hosts, ctx.out_hosts)
+        if verdict == "excluded":  # the program put this host out of scope: never fetched, never approvable
+            _record(db, ctx, tool_name, tool_input, "auto_denied", "out", hosts, message=EXCLUDED)
+            return _deny(EXCLUDED)
         if verdict == "out":
             _record(db, ctx, tool_name, tool_input, "auto_allowed", verdict, hosts)
             return _allow()

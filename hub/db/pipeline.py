@@ -4,7 +4,9 @@ import json
 import re
 
 from . import now_iso
+from ..gate_rules import excluded, scope_verdict
 from .bounties import HttpError, require_confirmed_snapshot
+from .scope import snapshot_scope
 
 KINDS = ("lab", "bounty")
 FINISHED = ("done", "failed", "stopped", "skipped")
@@ -25,7 +27,24 @@ def _slug(db, name):
     return slug
 
 
+def bounty_scope_hosts(scope, operator_hosts):
+    """A bounty engagement's scope hosts: the confirmed snapshot's in_scope hosts, or the operator's
+    narrower choice. Each chosen host must be one of those entries or matched by one, and none may be
+    out of scope or excluded. Raises ValueError otherwise, or when the snapshot names no host at all."""
+    if not scope["in"]:
+        raise ValueError("the program's confirmed scope names no in-scope host; a bounty engagement needs at least one")
+    if not operator_hosts:
+        return list(scope["in"])
+    bad = [h for h in operator_hosts
+           if excluded([h], scope["out"]) or (h.lower() not in scope["in"] and scope_verdict([h.lower()], False, scope["in"]) != "in")]
+    if bad:
+        raise ValueError(f"hosts outside the program's confirmed in-scope assets (or excluded): {', '.join(bad)}")
+    return list(operator_hosts)
+
+
 def create_engagement(db, name, kind, scope_hosts, scope_notes, authorization, program_id=None, snapshot_id=None):
+    """A lab engagement's scope is the operator's hosts. A bounty engagement's comes from its program's latest
+    confirmed snapshot (`bounty_scope_hosts`); `snapshot_id` is never taken from the caller."""
     name = (name or "").strip()
     if not name:
         raise ValueError("engagement name is required")
@@ -39,6 +58,7 @@ def create_engagement(db, name, kind, scope_hosts, scope_notes, authorization, p
             snapshot_id = require_confirmed_snapshot(db, program_id)
         except HttpError as err:
             raise ValueError(str(err)) from err
+        hosts = bounty_scope_hosts(snapshot_scope(db, snapshot_id), hosts)
     else:
         if not hosts:
             raise ValueError("a lab engagement needs at least one host")

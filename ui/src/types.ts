@@ -185,6 +185,8 @@ export interface ConfirmedProgram extends Program {
     exclusions: string[];
     confirmedAt: string;
     stale: boolean;
+    /** In-scope hosts the hub derives from this snapshot: exactly what a bounty engagement gets. */
+    scopeHosts: string[];
   };
 }
 
