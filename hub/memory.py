@@ -117,27 +117,32 @@ def build_tools(db, agent, run_id, read_only=False, write_tools=None):
     return tools
 
 
+def _arg(argv, name):
+    flag = f"--{name}"
+    return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
+
+
+def write_limits(argv):
+    """(read_only, write_tools) from the command line. `--write-tools` limits the write tools to
+    the named ones; given with a missing or empty value it means none at all (read-only), never all."""
+    read_only = "--read-only" in argv
+    if "--write-tools" not in argv:
+        return read_only, None
+    value = _arg(argv, "write-tools")
+    names = [] if value is None or value.startswith("--") else [w.strip() for w in value.split(",") if w.strip()]
+    return read_only or not names, names
+
+
 def main():
     argv = sys.argv[1:]
-
-    def arg(name):
-        flag = f"--{name}"
-        return argv[argv.index(flag) + 1] if flag in argv and argv.index(flag) + 1 < len(argv) else None
-
-    agent, db_file = arg("agent"), arg("db")
+    agent, db_file = _arg(argv, "agent"), _arg(argv, "db")
     if agent not in OWNERSHIP or not db_file:
         print("usage: memory.py --agent <known agent id> --db <file> [--read-only] [--write-tools a,b]", file=sys.stderr)
         sys.exit(1)
 
     db = open_db(db_file)
-    writes = arg("write-tools")
-    tools = build_tools(
-        db,
-        agent,
-        os.environ.get("EI_RUN_ID") or None,
-        read_only="--read-only" in argv,
-        write_tools=None if writes is None else [w for w in writes.split(",") if w],
-    )
+    read_only, write_tools = write_limits(argv)
+    tools = build_tools(db, agent, os.environ.get("EI_RUN_ID") or None, read_only=read_only, write_tools=write_tools)
     schemas = {n: {"description": d, "inputSchema": sch} for n, (d, sch, _) in tools.items()}
     serve(schemas, lambda name, args: tools[name][2](args), f"ei-memory:{agent}")
 
