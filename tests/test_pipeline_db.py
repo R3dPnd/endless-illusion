@@ -73,7 +73,7 @@ def test_dann_saves_plan_draft_and_operator_approves(db):
     insert_agent_row(db, "dann-of-thursday", "run-1", "plan_drafts", {"engagement_id": e["id"], "summary": "s", "plan": plan})
     assert latest_plan_draft(db, e["id"])["plan"] == plan
     assert approved_plan(db, e["id"]) is None
-    approve_plan(db, e["id"])
+    approve_plan(db, e["id"], latest_plan_draft(db, e["id"])["id"])
     assert approved_plan(db, e["id"])["plan"] == plan
 
 
@@ -94,4 +94,21 @@ def test_plan_draft_must_target_the_runs_own_engagement(db):
 
 def test_approve_plan_without_draft_raises(db):
     with pytest.raises(ValueError):
-        approve_plan(db, lab(db)["id"])
+        approve_plan(db, lab(db)["id"], 1)
+
+
+def test_approve_plan_only_the_latest_draft(db):
+    """I3: approving names a draft id, which must still be the latest one (else HttpError 409)."""
+    from hub.db.bounties import HttpError
+
+    e = lab(db)
+    add_stage(db, e["id"], "planning", "run-q", False)
+    first = insert_agent_row(db, "dann-of-thursday", "run-q", "plan_drafts", {"engagement_id": e["id"], "plan": {"stages": {}}})["id"]
+    second = insert_agent_row(db, "dann-of-thursday", "run-q", "plan_drafts", {"engagement_id": e["id"], "plan": {"stages": {}}})["id"]
+    for stale in (first, True, str(second), None):
+        with pytest.raises(HttpError) as err:
+            approve_plan(db, e["id"], stale)
+        assert err.value.status == 409
+    assert approved_plan(db, e["id"]) is None
+    approve_plan(db, e["id"], second)
+    assert approved_plan(db, e["id"])["draft_id"] == second

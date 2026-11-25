@@ -175,7 +175,7 @@ class Hub:
             ("POST", r"/api/engagements/(\d+)/stages/([^/]+)/start", lambda m, q, b: self.stage_start(m.group(1), m.group(2), b)),
             ("POST", r"/api/engagements/(\d+)/stages/([^/]+)/skip", lambda m, q, b: self.stage_skip(m.group(1), m.group(2))),
             ("POST", r"/api/engagements/(\d+)/stages/([^/]+)/stop", lambda m, q, b: self.stage_stop(m.group(1), m.group(2))),
-            ("POST", r"/api/engagements/(\d+)/plan/approve", lambda m, q, b: self.plan_approve(m.group(1))),
+            ("POST", r"/api/engagements/(\d+)/plan/approve", lambda m, q, b: self.plan_approve(m.group(1), b)),
             ("POST", r"/api/engagements/(\d+)/plan/revise", lambda m, q, b: revise_plan(self, self._eng(m.group(1))["id"], b.get("comment"))),
             ("POST", r"/api/engagements/(\d+)/ask", lambda m, q, b: self.engagement_ask(m.group(1), b)),
             ("POST", r"/api/gate/actions/(\d+)/decide", lambda m, q, b: self.gate_decide(m.group(1), b)),
@@ -289,15 +289,24 @@ class Hub:
             raise HttpError(400, f"the {stage} stage has no running run")
         return {"stopped": stopped}
 
-    def plan_approve(self, raw_id):
+    def plan_approve(self, raw_id, body):
+        """Approve the draft the operator saw (`draftId`): 409 if it is no longer the latest, or while Planning runs."""
         eng = self._eng(raw_id)
+        draft_id = body.get("draftId")
+        if type(draft_id) is not int:  # bool is an int subclass; never accept it (or "1", 1.0) as an id
+            raise HttpError(400, "draftId must be an integer")
         draft = latest_plan_draft(self.db, eng["id"])
         if draft is None:
             raise HttpError(400, "no plan draft to approve")
+        planning = next(s for s in stage_view(self.db, eng["id"], live_check(self)) if s["stage"] == "planning")
+        if planning["status"] in ("running", "awaiting-approval"):
+            raise HttpError(409, "the planning stage is still running; wait for its draft before approving")
+        if draft["id"] != draft_id:
+            raise HttpError(409, "that is not the latest plan draft; review the new draft first")
         error = validate_plan(draft["plan"])
         if error:
             raise HttpError(400, error)
-        return {"planId": approve_plan(self.db, eng["id"])}
+        return {"planId": approve_plan(self.db, eng["id"], draft_id)}
 
     def engagement_ask(self, raw_id, body):
         eng = self._eng(raw_id)

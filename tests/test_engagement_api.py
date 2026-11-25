@@ -121,15 +121,47 @@ def test_skip_and_start_routes(api):
 def test_plan_approve_validates(api):
     hub, client = api
     eid = lab(client)["id"]
-    assert client.post(f"/api/engagements/{eid}/plan/approve")[0] == 400  # no draft
+    assert client.post(f"/api/engagements/{eid}/plan/approve", {"draftId": 1})[0] == 400  # no draft
     set_stage_status(hub.db, add_stage(hub.db, eid, "planning", "r", False), "done")
-    insert_agent_row(hub.db, "dann-of-thursday", "r", "plan_drafts", {"engagement_id": eid, "summary": "s", "plan": {"stages": {"web": {"include": "yes"}}}})
-    status, body = client.post(f"/api/engagements/{eid}/plan/approve")
+    bad = insert_agent_row(hub.db, "dann-of-thursday", "r", "plan_drafts", {"engagement_id": eid, "summary": "s", "plan": {"stages": {"web": {"include": "yes"}}}})
+    status, body = client.post(f"/api/engagements/{eid}/plan/approve", {"draftId": bad["id"]})
     assert status == 400 and body["error"]
-    insert_agent_row(hub.db, "dann-of-thursday", "r", "plan_drafts", {"engagement_id": eid, "summary": "s", "plan": PLAN})
-    assert client.post(f"/api/engagements/{eid}/plan/approve")[0] == 200
+    good = insert_agent_row(hub.db, "dann-of-thursday", "r", "plan_drafts", {"engagement_id": eid, "summary": "s", "plan": PLAN})
+    assert client.post(f"/api/engagements/{eid}/plan/approve", {"draftId": good["id"]})[0] == 200
     plan = client.get(f"/api/engagements/{eid}")[1]["plan"]
     assert plan["approved"]["plan"] == PLAN and plan["draft"]["plan"] == PLAN
+    assert plan["approved"]["draft_id"] == plan["draft"]["id"] == good["id"]  # I2: the UI compares these
+
+
+def test_plan_approve_needs_the_rendered_latest_draft(api):
+    """I3: Approve names the draft the operator saw; a newer draft, or Planning still running, is a 409."""
+    hub, client = api
+    eid = lab(client, name="Approve Lab")["id"]
+    sid = add_stage(hub.db, eid, "planning", "r-approve", False)
+    set_stage_status(hub.db, sid, "done")
+    first = insert_agent_row(hub.db, "dann-of-thursday", "r-approve", "plan_drafts", {"engagement_id": eid, "plan": PLAN})["id"]
+    for bad in (None, "1", str(first), True, 1.0, [first]):
+        body = {} if bad is None else {"draftId": bad}
+        status, out = client.post(f"/api/engagements/{eid}/plan/approve", body)
+        assert status == 400 and "draftId" in out["error"], bad
+    second = insert_agent_row(hub.db, "dann-of-thursday", "r-approve", "plan_drafts", {"engagement_id": eid, "plan": PLAN})["id"]
+    assert client.post(f"/api/engagements/{eid}/plan/approve", {"draftId": first})[0] == 409  # not the latest any more
+    other = lab(client, name="Other Approve Lab")["id"]
+    assert client.post(f"/api/engagements/{other}/plan/approve", {"draftId": second})[0] == 400  # no draft there
+    # Planning running again (a revision in flight): nothing can be approved until it is done.
+    hub.db.run("UPDATE ops_stages SET status = 'running' WHERE id = ?", sid)
+    live = type("LiveRun", (), {"finished": False, "status": "running"})()
+    hub.runner.live["r-approve"] = live
+    try:
+        status, out = client.post(f"/api/engagements/{eid}/plan/approve", {"draftId": second})
+        assert status == 409 and "running" in out["error"]
+    finally:
+        del hub.runner.live["r-approve"]
+        set_stage_status(hub.db, sid, "done")
+    assert hub.db.get("SELECT COUNT(*) AS n FROM ops_plans WHERE engagement_id = ?", eid)["n"] == 0
+    status, out = client.post(f"/api/engagements/{eid}/plan/approve", {"draftId": second})
+    assert status == 200
+    assert client.get(f"/api/engagements/{eid}")[1]["plan"]["approved"]["draft_id"] == second
 
 
 def test_unknown_engagement_404(api):

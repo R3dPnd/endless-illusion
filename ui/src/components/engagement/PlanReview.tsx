@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { Banner, Button, EmptyState, Panel, TextField } from "pnd-lib-react";
 import { approvePlan, revisePlan } from "../../api";
+import { planIsApproved } from "../../engagement";
 import { useGuarded } from "../../hooks/useEngagement";
 import type { EngagementDetail } from "../../types";
 
@@ -16,7 +17,7 @@ export default function PlanReview({ engagementId, plan, planError, onChanged }:
   const [comment, setComment] = useState("");
   const { error, busy, run } = useGuarded();
   const draft = plan.draft;
-  const approved = !!draft && plan.approved?.id === draft.id;
+  const approved = planIsApproved(plan);
 
   async function act(fn: () => Promise<unknown>) {
     const ok = await run(fn);
@@ -61,7 +62,7 @@ export default function PlanReview({ engagementId, plan, planError, onChanged }:
             <>
               <TextField label="Revision comment" value={comment} onChange={setComment} rows={2} placeholder="What should change?" />
               <div className="toolbar">
-                <Button variant="primary" disabled={busy} onClick={() => void act(() => approvePlan(engagementId))}>
+                <Button variant="primary" disabled={busy} onClick={() => void act(() => approvePlan(engagementId, draft.id))}>
                   Approve plan
                 </Button>
                 <Button variant="ghost" disabled={busy || !comment.trim()} onClick={() => void act(() => revisePlan(engagementId, comment.trim()))}>

@@ -1,4 +1,4 @@
-import type { GateAction, ScopeVerdict, StageView } from "./types";
+import type { EngagementDetail, GateAction, ScopeVerdict, StageView } from "./types";
 
 export type StageButton = "start" | "arm" | "stop" | "skip" | "rerun" | "open";
 export type CardButton = "approve" | "deny" | "denyWithReason" | "ask";
@@ -46,3 +46,19 @@ const LABELS: Record<ScopeVerdict, string> = {
   none: "no target host",
 };
 export const verdictLabel = (v: ScopeVerdict): string => LABELS[v];
+
+/** The shown draft is the approved one: ops_plans.draft_id names the draft it copied (row ids of the two tables never compare). */
+export const planIsApproved = (plan: EngagementDetail["plan"]): boolean =>
+  !!plan.draft && !!plan.approved && plan.approved.draft_id === plan.draft.id;
+
+/** A stage start's body. Armed is sent only when ticked AND the card offers arming: every arm is deliberate. */
+export function startBody(armed: boolean, buttons: StageButton[], research: boolean, question: string): { armed?: true; question?: string } {
+  return { ...(armed && buttons.includes("arm") ? { armed: true as const } : {}), ...(research ? { question: question.trim() } : {}) };
+}
+
+/** Pending approvals of engagements other than the selected one, per engagement (in first-seen order). */
+export function pendingElsewhere(items: GateAction[], selectedId: number | null): { engagementId: number; count: number }[] {
+  const counts = new Map<number, number>();
+  for (const a of items) if (a.engagement_id !== selectedId) counts.set(a.engagement_id, (counts.get(a.engagement_id) ?? 0) + 1);
+  return [...counts].map(([engagementId, count]) => ({ engagementId, count }));
+}

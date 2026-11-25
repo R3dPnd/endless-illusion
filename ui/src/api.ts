@@ -85,7 +85,8 @@ export const startStage = (id: number, stage: string, body: { armed?: boolean; q
   postJson<{ runId: string }>(`${eng(id)}/stages/${stage}/start`, body);
 export const skipStage = (id: number, stage: string) => postJson(`${eng(id)}/stages/${stage}/skip`, {});
 export const stopStage = (id: number, stage: string) => postJson(`${eng(id)}/stages/${stage}/stop`, {});
-export const approvePlan = (id: number) => postJson<{ planId: number }>(`${eng(id)}/plan/approve`, {});
+/** Approves exactly the draft the operator was shown (`draftId`); the hub answers 409 if a newer draft exists or Planning is running. */
+export const approvePlan = (id: number, draftId: number) => postJson<{ planId: number }>(`${eng(id)}/plan/approve`, { draftId });
 export const revisePlan = (id: number, comment: string) => postJson(`${eng(id)}/plan/revise`, { comment });
 export const askQuestion = (
   id: number,

@@ -236,9 +236,12 @@ export interface Plan {
   stages: Partial<Record<StageName, PlanStage>>;
   research?: string[];
 }
+/** A plan_drafts row (the draft) or an ops_plans row (the approved plan). */
 export interface PlanRow {
   id: number;
   plan: Plan;
+  /** ops_plans only: the plan_drafts id it approved. Compare this with the draft's `id`, never the two ids. */
+  draft_id?: number;
 }
 
 /** A gated action waiting on the operator (also the shape /api/gate/pending returns). */

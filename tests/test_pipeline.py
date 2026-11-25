@@ -10,7 +10,7 @@ import pytest
 from hub import pipeline
 from hub.db import now_iso
 from hub.db.archive import add_report, create_run, get_run
-from hub.db.pipeline import add_stage, approve_plan, create_engagement, set_stage_status
+from hub.db.pipeline import add_stage, approve_plan, create_engagement, latest_plan_draft, set_stage_status
 from hub.tool_names import DECLARE_TOOL, PERMISSION_TOOL, SHARED_READ_TOOLS, qualified_tools_for
 
 from .conftest import start_hub
@@ -74,7 +74,7 @@ def approve(hub, eid, plan):
     hub.db.run(
         "INSERT INTO plan_drafts (agent, run_id, created_at, engagement_id, summary, plan) VALUES ('dann-of-thursday', NULL, ?, ?, '', ?)",
         now_iso(), eid, json.dumps(plan))
-    approve_plan(hub.db, eid)
+    approve_plan(hub.db, eid, latest_plan_draft(hub.db, eid)["id"])
 
 
 def wait(hub, run_id, timeout=10):
@@ -136,7 +136,7 @@ def test_web_locked_until_plan_approved(hub):
     assert view(hub, eid)["web"]["status"] == "locked"  # a draft is not an approval
     with pytest.raises(ValueError, match="locked"):
         pipeline.start_stage(hub, eid, "web")
-    approve_plan(hub.db, eid)
+    approve_plan(hub.db, eid, latest_plan_draft(hub.db, eid)["id"])
     v = view(hub, eid)
     assert v["web"]["status"] == "ready" and v["api"]["status"] == "ready"
     assert v["analysis"]["status"] == "locked"

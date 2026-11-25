@@ -99,11 +99,15 @@ def latest_plan_draft(db, engagement_id):
     return _plan(db.get("SELECT * FROM plan_drafts WHERE engagement_id = ? ORDER BY id DESC LIMIT 1", engagement_id))
 
 
-def approve_plan(db, engagement_id):
+def approve_plan(db, engagement_id, draft_id):
+    """Copy draft `draft_id` into the approved plan. It must still be the engagement's latest draft
+    (re-checked inside the transaction): HttpError 409 otherwise, so a newer draft is never approved unseen."""
     with db.transaction():
         draft = db.get("SELECT id, plan FROM plan_drafts WHERE engagement_id = ? ORDER BY id DESC LIMIT 1", engagement_id)
         if not draft:
             raise ValueError("no plan draft to approve")
+        if type(draft_id) is not int or draft["id"] != draft_id:
+            raise HttpError(409, "that is not the latest plan draft; review the new draft first")
         pid, _ = db.run(
             "INSERT INTO ops_plans (engagement_id, draft_id, plan, approved_at) VALUES (?,?,?,?)",
             engagement_id, draft["id"], draft["plan"], now_iso(),
