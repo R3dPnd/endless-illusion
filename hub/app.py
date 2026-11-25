@@ -282,7 +282,9 @@ class Hub:
             "SELECT run_id FROM ops_stages WHERE engagement_id = ? AND stage = ? AND status = 'running' AND run_id IS NOT NULL",
             eng["id"], self._stage_name(stage),
         )
-        stopped = [r["run_id"] for r in rows if self.runner.stop(r["run_id"])]
+        # Only runs still going count: a run stopped a moment ago keeps its 'running' row until it is archived.
+        live = [r["run_id"] for r in rows if getattr(self.runner.get(r["run_id"]), "status", None) == "running"]
+        stopped = [run_id for run_id in live if self.runner.stop(run_id)]
         if not stopped:
             raise HttpError(400, f"the {stage} stage has no running run")
         return {"stopped": stopped}

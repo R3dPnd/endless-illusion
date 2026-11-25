@@ -12,6 +12,7 @@ from hub.db.pipeline import (
     set_stage_status,
     stage_rows,
 )
+from hub.db.validate import ValidationError
 from hub.db.write import insert_agent_row
 
 
@@ -68,11 +69,27 @@ def test_stages(db):
 def test_dann_saves_plan_draft_and_operator_approves(db):
     e = lab(db)
     plan = {"stages": {"web": {"include": True, "targets": ["juice.local"], "focus": "xss"}}, "research": []}
+    add_stage(db, e["id"], "planning", "run-1", False)
     insert_agent_row(db, "dann-of-thursday", "run-1", "plan_drafts", {"engagement_id": e["id"], "summary": "s", "plan": plan})
     assert latest_plan_draft(db, e["id"])["plan"] == plan
     assert approved_plan(db, e["id"]) is None
     approve_plan(db, e["id"])
     assert approved_plan(db, e["id"])["plan"] == plan
+
+
+def test_plan_draft_must_target_the_runs_own_engagement(db):
+    """M2: a plan draft is accepted only for the engagement whose stage the writing run belongs to."""
+    mine, other = lab(db), create_engagement(db, "Other Lab", "lab", ["10.0.0.9"], "", "lab")
+    add_stage(db, mine["id"], "planning", "run-p", False)
+    plan = {"stages": {}, "research": []}
+    with pytest.raises(ValidationError, match="engagement"):
+        insert_agent_row(db, "dann-of-thursday", "run-p", "plan_drafts", {"engagement_id": other["id"], "plan": plan})
+    for run_id in (None, "no-stage-run"):  # a Console run (no stage row) cannot write a plan draft either
+        with pytest.raises(ValidationError, match="engagement"):
+            insert_agent_row(db, "dann-of-thursday", run_id, "plan_drafts", {"engagement_id": mine["id"], "plan": plan})
+    assert db.get("SELECT COUNT(*) AS n FROM plan_drafts")["n"] == 0
+    insert_agent_row(db, "dann-of-thursday", "run-p", "plan_drafts", {"engagement_id": mine["id"], "plan": plan})
+    assert latest_plan_draft(db, mine["id"])["run_id"] == "run-p"
 
 
 def test_approve_plan_without_draft_raises(db):

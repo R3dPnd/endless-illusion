@@ -2,6 +2,7 @@ import json
 
 import pytest
 
+from hub.db.pipeline import add_stage, set_stage_status
 from hub.db.write import insert_agent_row
 
 from .conftest import start_hub
@@ -121,6 +122,7 @@ def test_plan_approve_validates(api):
     hub, client = api
     eid = lab(client)["id"]
     assert client.post(f"/api/engagements/{eid}/plan/approve")[0] == 400  # no draft
+    set_stage_status(hub.db, add_stage(hub.db, eid, "planning", "r", False), "done")
     insert_agent_row(hub.db, "dann-of-thursday", "r", "plan_drafts", {"engagement_id": eid, "summary": "s", "plan": {"stages": {"web": {"include": "yes"}}}})
     status, body = client.post(f"/api/engagements/{eid}/plan/approve")
     assert status == 400 and body["error"]
