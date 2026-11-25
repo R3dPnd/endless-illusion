@@ -68,15 +68,18 @@ def _deny(message: str) -> dict:
 
 
 def context_for_run(db, run_id, repo_root: Path) -> RunContext | None:
-    """The engagement stage a run belongs to (via `ops_stages.run_id`), or None."""
+    """The engagement stage a run belongs to (via `ops_stages.run_id`), or None.
+
+    Only a live stage counts: the run's latest `ops_stages` row must be `running`.
+    A finished, stopped or skipped stage has no context, so its calls are denied."""
     if not isinstance(run_id, str) or not run_id:
         return None
     row = db.get(
-        "SELECT s.engagement_id, s.stage, e.slug, e.scope_hosts FROM ops_stages s"
+        "SELECT s.engagement_id, s.stage, s.status, e.slug, e.scope_hosts FROM ops_stages s"
         " JOIN ops_engagements e ON e.id = s.engagement_id WHERE s.run_id = ? ORDER BY s.id DESC LIMIT 1",
         run_id,
     )
-    if row is None or not _SLUG_RE.match(row["slug"] or ""):
+    if row is None or row["status"] != "running" or not _SLUG_RE.match(row["slug"] or ""):
         return None
     try:
         hosts = json.loads(row["scope_hosts"] or "[]")

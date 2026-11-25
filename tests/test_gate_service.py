@@ -87,6 +87,17 @@ def test_context_for_run_unknown_run_is_none(db, tmp_path):
     assert context_for_run(db, "", tmp_path) is None
 
 
+@pytest.mark.parametrize("status", ["done", "failed", "stopped", "skipped", "ready"])
+def test_context_for_run_needs_a_running_stage(db, tmp_path, status):
+    """I5: a run whose stage row is no longer running has no context, so every gated call is denied."""
+    ctx = make_ctx(db, tmp_path)
+    row = db.get("SELECT id FROM ops_stages WHERE run_id = ?", ctx.run_id)
+    db.run("UPDATE ops_stages SET status = ? WHERE id = ?", status, row["id"])
+    assert context_for_run(db, ctx.run_id, tmp_path) is None
+    reply = check_permission(db, None, "Bash", {"command": IN_CMD}, no_wait)
+    assert reply["behavior"] == "deny"
+
+
 def test_record_declaration_rejects_empty_fields(db, tmp_path):
     ctx = make_ctx(db, tmp_path)
     for field in ("target", "why", "technique", "risk"):
