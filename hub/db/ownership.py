@@ -10,7 +10,7 @@ OWNERSHIP = {
     "diablo-of-monday": ["web_findings"],
     "metsa-of-tuesday": ["api_endpoints", "api_findings"],
     "dahlia-of-wednesday": ["cve_notes", "program_leads"],
-    "dann-of-thursday": ["engagements", "run_engagements"],
+    "dann-of-thursday": ["engagements", "run_engagements", "plan_drafts"],
     "sin-of-friday": ["exploit_analyses"],
     "sen-of-saturday": ["scope_proposals", "submissions"],
 }

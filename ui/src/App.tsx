@@ -8,14 +8,17 @@ import ErrorBoundary from "./components/ErrorBoundary";
 import ArchivePage from "./pages/ArchivePage";
 import BountiesPage from "./pages/BountiesPage";
 import ConsolePage from "./pages/ConsolePage";
+import EngagementsPage from "./pages/EngagementsPage";
+import { usePendingGate } from "./hooks/useEngagement";
 import { scoutTask, type DannSession } from "./bounties";
 import { speakerFor } from "./speakers";
 import type { Program } from "./types";
 
-const ROUTES = ["console", "bounties", "archive"] as const;
+const ROUTES = ["engagements", "console", "bounties", "archive"] as const;
 type Route = (typeof ROUTES)[number];
 
-const TABS: { id: Route; label: string }[] = [
+const BASE_TABS: { id: Route; label: string; count?: number }[] = [
+  { id: "engagements", label: "Engagements" },
   { id: "console", label: "Console" },
   { id: "bounties", label: "Bounties" },
   { id: "archive", label: "Archive" },
@@ -28,6 +31,10 @@ export default function App() {
   const [route, setRoute] = useHashRoute(ROUTES);
   const bounties = useBounties(run.busy);
   const [programId, setProgramId] = useState<number | null>(null);
+  const pendingGate = usePendingGate();
+  const pendingApprovals = pendingGate.count;
+  // The badge is the number of gated actions waiting on the operator, across engagements.
+  const TABS = BASE_TABS.map((t) => (t.id === "engagements" && pendingApprovals > 0 ? { ...t, count: pendingApprovals } : t));
 
   // Scope proposals are Sen's job: start a passive Sen run for the program.
   function askSen(p: Program) {
@@ -91,6 +98,7 @@ export default function App() {
       {agents.error && <Banner>Could not load agents: {agents.error}. Is the server running on :8787?</Banner>}
 
       <ErrorBoundary key={route} area={TABS.find((t) => t.id === route)?.label ?? "This tab"}>
+        {route === "engagements" && <EngagementsPage programs={bounties.data?.confirmed ?? []} pendingAll={pendingGate.items} />}
         {route === "console" && (
           <ConsolePage agents={agents} run={run} programs={bounties.data?.confirmed ?? []} programId={programId} onProgramChange={setProgramId} />
         )}

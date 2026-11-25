@@ -1,0 +1,903 @@
+"""Pure gate rules for the engagement approval gate.
+
+Decides (a) whether an agent's shell command / file write is local-only and may
+be auto-allowed, and (b) whether the hosts a command touches are in the
+engagement scope.
+
+Security posture: when in doubt the answer is "gated" / "unknown" / "out" /
+"denied" -- never "local" or "in".  Over-detection (a filename that looks like
+a host, a `$` that is really an awk field) only causes extra gating; the
+dangerous direction is under-detection, so every parser here is deliberately
+strict and rejects anything it does not fully understand.
+"""
+
+from __future__ import annotations
+
+import os
+import pwd
+import re
+from pathlib import Path
+
+LOCAL_COMMANDS: frozenset[str] = frozenset(
+    "grep rg jq cat ls head tail wc sed awk sort uniq cut tr diff file echo pwd mkdir tee".split()
+)
+
+# ---------------------------------------------------------------- host extraction
+
+# TLDs recognised for bare `name.tld` tokens.  Deliberately broad: a false hit
+# only means extra gating.
+_FILE_LIKE_TLDS = frozenset("sh py md rs pl zip mov".split())
+_TLDS = frozenset(
+    """com net org io dev app edu gov mil int info biz me us uk de fr ru cn jp in br nl it es se no fi ch at be
+    pl cz tv cc xyz online site tech cloud ai so to ly co ca au nz za kr tw hk sg id vn th my ph mx ar cl pe ve
+    ua tr gr pt ie dk hu ro bg sk si hr rs lt lv ee is il ae sa ir pk bd eu asia name pro mobi store shop blog
+    top club vip link live life world today space website fun wiki page host cyber network systems security
+    local internal lan home corp localhost test example invalid onion""".split()
+) | _FILE_LIKE_TLDS
+
+_URL_RE = re.compile(r"(?<![A-Za-z0-9_/.\-])(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//([^\s'\"`<>/?#\\]+)")
+_V6_RE = re.compile(r"\[([0-9A-Fa-f:.]*:[0-9A-Fa-f:.]*)\](?::(\d{1,5}))?")
+_SPLIT_RE = re.compile(r"[^a-z0-9_.:\-]+")
+_V6_TAIL_RE = re.compile(r"(?<![0-9a-z])(?:[0-9a-f]{0,4}:){2,}[0-9a-f.]{0,15}")
+_TOKEN_RE = re.compile(r"^([a-z0-9_.\-]+?)(?::(\d{1,5}))?$")
+_NUMERIC_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|\d+)(?:\.(?:0x[0-9a-f]+|\d+)){1,3}$")
+_INT_IP_RE = re.compile(r"^(?:0x[0-9a-f]+|\d{6,})$")
+_LABEL_RE = re.compile(r"^[a-z0-9_\-]+$")
+
+_INDIRECT_RE = re.compile(
+    r"\$"  # any $: $VAR ${..} $(..) $'..' and zsh forms ($=X $~X $^X $[..])
+    r"|`"
+    r"|\beval\b|\bbase64\b|\bxxd\b"
+    r"|\\x[0-9a-fA-F]{2}"
+    r"|\{[^{}]*(?:,|\.\.)[^{}]*\}"  # brace expansion
+    r"|[^\x00-\x7f]"  # non-ASCII: homoglyph / fullwidth-dot hosts
+)
+
+
+def _authority(auth: str) -> str | None:
+    """`user:pw@host:port` -> `host` or `host:port` (lowercase), or None."""
+    auth = auth.rsplit("@", 1)[-1].lower()
+    if auth.startswith("["):
+        end = auth.find("]")
+        if end < 0:
+            return None
+        host, rest = auth[: end + 1], auth[end + 1 :]
+        port = rest[1:] if rest.startswith(":") and rest[1:].isdigit() else ""
+    else:
+        host, _, port = auth.partition(":")
+        if port and not port.isdigit():
+            port = ""
+        host = host.rstrip(".")
+    if not host or host == "[]":
+        return None
+    return f"{host}:{port}" if port else host
+
+
+def _scan_hosts(text: str, file_like: bool) -> list[str]:
+    hosts: list[str] = []
+
+    def add(h: str | None) -> None:
+        if h and h not in hosts:
+            hosts.append(h)
+
+    low = text.lower()
+    for m in _URL_RE.finditer(text):
+        add(_authority(m.group(1)))
+    for m in _V6_RE.finditer(text):
+        add(f"[{m.group(1).lower()}]" + (f":{m.group(2)}" if m.group(2) else ""))
+
+    def bare(h: str, port: str | None) -> None:
+        h = h.strip(".-")
+        if not h:
+            return
+        hp = f"{h}:{port}" if port else h
+        if _INT_IP_RE.match(h) or _NUMERIC_IP_RE.match(h):
+            # file_like=False (local-only commands): only unmistakable dotted quads
+            if file_like or h.count(".") == 3:
+                add(hp)
+            return
+        labels = h.split(".")
+        if not all(_LABEL_RE.match(label) for label in labels):
+            return
+        if len(labels) >= 2 and labels[-1] in _TLDS:
+            if not file_like and labels[-1] in _FILE_LIKE_TLDS:
+                return
+            add(hp)
+        elif len(labels) == 1 and (h == "localhost" or (port and h[0].isalpha())):
+            add(hp)
+
+    for tok in _SPLIT_RE.split(low):
+        tok = tok.strip(".:")
+        if not tok:
+            continue
+        if tok.count(":") >= 2:
+            for m in _V6_TAIL_RE.finditer(tok):
+                v6 = m.group(0).strip(".")
+                if v6 and not file_like and not re.search(r"[a-f]|::", v6):
+                    continue  # looks like a clock time in a local-only command
+                if v6:
+                    add(v6)
+        m = _TOKEN_RE.match(tok)
+        if m:
+            bare(m.group(1), m.group(2))
+        elif ":" in tok:
+            for part in tok.split(":"):
+                bare(part.strip("."), None)
+    return hosts
+
+
+_KNOWN_HEADS = frozenset(
+    "curl wget ssh nc nmap http httpie python python3 node ruby perl dig nslookup host ping".split()
+) | LOCAL_COMMANDS
+
+
+def _flag_table(bool_: str = "", method: str = "", num: str = "", value: str = "", out: str = "",
+                long_bool: str = "", long_method: str = "", long_num: str = "", long_value: str = "",
+                long_out: str = "") -> dict[str, str]:
+    """Build one program's flag table: `-x` / `--name` -> kind.  Short groups are
+    strings of letters; long groups are space-separated names without `--`."""
+    t: dict[str, str] = {}
+    for kind, letters in (("bool", bool_), ("method", method), ("num", num), ("value", value), ("out", out)):
+        for c in letters:
+            assert f"-{c}" not in t, c
+            t[f"-{c}"] = kind
+    for kind, names in (("bool", long_bool), ("method", long_method), ("num", long_num),
+                        ("value", long_value), ("out", long_out)):
+        for n in names.split():
+            assert f"--{n}" not in t, n
+            t[f"--{n}"] = kind
+    return t
+
+
+# Per-program flag semantics.  Kinds: "bool" (no value; may be clustered),
+# "method" (upper-case HTTP method), "num" (small integer), "value" (must be
+# exactly one host/URL), "out" (output file: absolute workdir path).  A flag NOT
+# listed for its program -- and every flag of a program with an empty table --
+# makes the text indirect ("unknown").  Only flags whose meaning for that program
+# is certain are listed; input-file / config / command flags (curl -K, wget -i/-e,
+# nmap -iL, ssh -F/-o/-L/-R/-D/-W) are deliberately absent.  So are the redirect-
+# following flags (curl -L/--location/--location-trusted, httpie --follow): a
+# redirect can send the request to any host, so they make the text indirect.  wget
+# follows redirects by default, so every wget segment also needs `--max-redirect=0`
+# (see `_REDIRECT_GUARD`).
+_FLAGS: dict[str, dict[str, str]] = {
+    "curl": _flag_table(
+        bool_="sSikvfIqnN46pO",  # -p = --proxytunnel, -O = --remote-name; no -L (redirects)
+        method="X",
+        num="m",
+        value="xHdAeu",
+        out="o",
+        long_bool="silent show-error insecure verbose fail head include compressed ipv4 ipv6 "
+        "proxytunnel remote-name no-buffer netrc",
+        long_method="request",
+        long_num="max-time connect-timeout retry max-redirs",
+        long_value="proxy connect-to resolve header referer user-agent user proxy-user preproxy socks5 "
+        "socks5-hostname doh-url interface dns-servers data data-raw data-binary data-urlencode json url",
+        long_out="output",
+    ),
+    "wget": _flag_table(
+        bool_="qvrcNSkp46",  # -r = --recursive, -p = --page-requisites
+        num="tT",  # --tries, --timeout
+        out="O",
+        long_bool="quiet verbose no-verbose recursive continue timestamping server-response spider "
+        "no-check-certificate page-requisites convert-links",
+        long_method="method",
+        long_num="tries timeout max-redirect",
+        long_value="header user-agent referer",
+        long_out="output-document",
+    ),
+    "ssh": _flag_table(
+        bool_="46AaCfgknNqTtvXxY",  # -X = X11 forwarding (boolean)
+        num="p",
+        value="J",
+    ),
+    "nc": _flag_table(bool_="vznu46", num="wp"),
+    "nmap": _flag_table(bool_="vn6F", num="p"),
+    "http": _flag_table(bool_="vfj", long_bool="verbose form json check-status"),  # no --follow (redirects)
+    "dig": _flag_table(bool_="46", num="p", value="x"),
+    "nslookup": {},
+    "host": _flag_table(bool_="46av", num="W"),
+    "ping": _flag_table(bool_="qnv", num="csWi"),
+}
+_FLAGS["httpie"] = _FLAGS["http"]
+# Programs that follow redirects unless told not to: the (flag, value) that turns it
+# off.  A segment of such a program without exactly that flag and value is indirect.
+_REDIRECT_GUARD: dict[str, tuple[str, str]] = {"wget": ("--max-redirect", "0")}
+
+
+def _guards(head: str, flag: str, value: str) -> bool:
+    guard = _REDIRECT_GUARD.get(head)
+    return guard is not None and flag == guard[0] and value.isdigit() and int(value) == int(guard[1])
+
+
+def _guard_after(head: str, flag: str, value: str, guarded: bool) -> bool:
+    """The segment's guard state after `flag value`. The program honours the LAST
+    redirect-limit flag it sees (`wget --max-redirect=0 --max-redirect=5` follows
+    5 redirects), so each occurrence of the guard flag replaces the state; any
+    other flag leaves it unchanged."""
+    guard = _REDIRECT_GUARD.get(head)
+    if guard is None or flag != guard[0]:
+        return guarded
+    return _guards(head, flag, value)
+_NO_FLAGS: dict[str, str] = {}  # interpreters, local commands, anything else
+_LONG_FLAG_RE = re.compile(r"^--[A-Za-z][A-Za-z0-9\-]*$")
+_METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
+_NUM_RE = re.compile(r"^\d{1,6}$")
+_URLWORD_RE = re.compile(r"^(?:[A-Za-z][A-Za-z0-9+.\-]*:)?//([^\s'\"`<>/?#\\]+)(?:[/?#]\S*)?$")
+_USER_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
+
+
+def _recognized_value(word: str, workdir: Path | None, paths_ok: bool = False) -> bool:
+    """True iff the whole word is exactly one host, `user@host`, a parsed URL,
+    or an absolute path inside workdir -- no unaccounted-for fragments."""
+    if paths_ok and workdir is not None and word.startswith("/") and _inside(word, workdir):
+        return True
+    m = _URLWORD_RE.match(word)
+    if m:
+        return _authority(m.group(1)) is not None
+    if "@" in word:
+        user, _, rest = word.rpartition("@")
+        if not _USER_RE.match(user):
+            return False
+        word = rest
+    word = word.lower().strip(".")
+    hosts = _scan_hosts(word, True)
+    return len(hosts) == 1 and hosts[0] == word
+
+
+def _unclassified_words(text: str, workdir: Path | None) -> bool:
+    """True if anything could hide an undetected host: an unknown program name,
+    a flag not listed for this program in `_FLAGS` (or an attached value), or a
+    word that is not exactly one host/URL (or an absolute path inside workdir).
+    Integers and upper-case words are accepted only as the value of a numeric /
+    method flag of the same program."""
+    try:
+        toks = _tokenize_full(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
+    except _Unparseable:
+        return True
+    at_head = True
+    expect: str | None = None  # "method" | "num" | "value" | "out"
+    expect_flag = ""  # the flag whose value `expect` is waiting for
+    head = ""
+    guarded = False  # this segment carries its program's `_REDIRECT_GUARD`
+
+    def unguarded() -> bool:  # the segment that just ended follows redirects
+        return head in _REDIRECT_GUARD and not guarded
+
+    def check(kind: str, val: str) -> bool:
+        if kind == "method":
+            return bool(_METHOD_RE.match(val))
+        if kind == "num":
+            return bool(_NUM_RE.match(val))
+        return _recognized_value(val, workdir, paths_ok=(kind == "out"))
+
+    for kind, val, raw in toks:
+        if kind == "op":
+            if val in _SPLIT_OPS:
+                if unguarded():
+                    return True
+                head, guarded = "", False
+            at_head = val in _SPLIT_OPS
+            expect = None
+            continue
+        # A word whose dequoted text differs from its raw text could hide a host from
+        # the raw-text scan.  Exempt: the program head, quoted -X methods, local-command patterns.
+        if raw != val and not at_head and expect != "method" and head not in LOCAL_COMMANDS:
+            return True
+        if at_head:
+            at_head = False
+            head = val
+            if val not in _KNOWN_HEADS:
+                return True
+            continue
+        if expect:
+            ok = check(expect, val)
+            expect = None
+            if not ok:
+                return True
+            guarded = _guard_after(head, expect_flag, val, guarded)
+            continue
+        if val == "--":
+            continue
+        if val.startswith("-") and len(val) > 1:
+            flags = _FLAGS.get(head, _NO_FLAGS)
+            if val.startswith("--"):
+                name, eq, value = val.partition("=")
+                if not _LONG_FLAG_RE.match(name):
+                    return True
+                kind_ = flags.get(name)
+                if kind_ is None:
+                    return True
+                if eq:
+                    if kind_ == "bool" or not check(kind_, value):
+                        return True
+                    guarded = _guard_after(head, name, value, guarded)
+                elif kind_ != "bool":
+                    expect, expect_flag = kind_, name
+                continue
+            letters = val[1:]
+            if len(letters) == 1:
+                kind_ = flags.get(val)
+                if kind_ is None:
+                    return True
+                if kind_ != "bool":
+                    expect, expect_flag = kind_, val
+                continue
+            if all(flags.get(f"-{c}") == "bool" for c in letters):
+                continue
+            return True
+        if not _recognized_value(val, workdir, paths_ok=head in LOCAL_COMMANDS):
+            return True
+    return expect is not None or unguarded()
+
+
+def extract_hosts(
+    text: str, *, file_like: bool = True, strict: bool = True, workdir: Path | None = None
+) -> tuple[list[str], bool]:
+    """Return `(hosts, indirect)` for a command line or URL text.
+
+    Hosts come from URLs (any scheme, incl. single-label hosts), bracketed and
+    unbracketed IPv6, `host:port` tokens, bare `name.tld` domains (known TLDs,
+    found anywhere inside a token), `localhost`, IPv4 and obfuscated numeric IPs
+    (hex / decimal / 2-4 part dotted).  Each is lowercased, as `host` or
+    `host:port` (port only when explicit).
+
+    `indirect` is True when the text can build or hide a host: any `$`,
+    backticks, `eval`, `base64`/`xxd`, hex escapes, brace expansion, any
+    non-ASCII character, an unparseable command line, and (with `strict`) any
+    segment head that is not a known program, any word whose dequoted text differs
+    from its raw text, any non-head word that is not exactly one host/URL (or a
+    flag listed for that program in `_FLAGS`), and any flag value other than a
+    host/URL, an upper-case method after that program's method flag (curl
+    `-X`/`--request`), a number after that program's numeric flag, or an
+    absolute `workdir` path as that program's output-file value.  Flag meanings
+    are per program; a flag not listed for its program is unknown.  Redirect
+    following is indirect too: curl `-L`/`--location`/`--location-trusted`, httpie
+    `--follow`, and any `wget` segment without `--max-redirect=0`.  A verdict on such
+    text can never be trusted ("unknown").  Over-triggering is intentional.
+
+    `file_like=False` ignores bare-domain matches whose TLD doubles as a common
+    file extension (`.sh .py .md .rs .pl .zip .mov`) and lone numerics -- only
+    used when no network-capable command is involved.  `strict=False` skips the
+    word-classification rule (also for local-only commands).
+    """
+    hosts = _scan_hosts(text, file_like)
+    indirect = bool(_INDIRECT_RE.search(text))
+    if strict and not indirect:
+        indirect = _unclassified_words(text, workdir)
+        try:  # hosts seen in dequoted words must also be reported (raw/dequoted views never disagree)
+            toks = _tokenize(text.replace("\n", " ; ").replace("\r", " ; "), glob_ok=True)
+        except _Unparseable:
+            toks = []
+        for kind, val in toks:
+            if kind == "word":
+                for h in _scan_hosts(val, file_like):
+                    if h not in hosts:
+                        hosts.append(h)
+    return hosts, indirect
+
+
+# ---------------------------------------------------------------- scope verdicts
+
+
+def _norm_entry(s: str) -> tuple[str, str | None] | None:
+    """Normalise a scope entry or host to `(host, port)`; None if unusable."""
+    s = s.strip().lower()
+    s = re.sub(r"^(?:[a-z][a-z0-9+.\-]*:)?//", "", s)
+    s = re.split(r"[/?#\\]", s, maxsplit=1)[0].rsplit("@", 1)[-1].strip()
+    if s.startswith("["):
+        end = s.find("]")
+        if end < 0:
+            return None
+        host, rest = s[: end + 1], s[end + 1 :]
+        if rest and not (rest.startswith(":") and rest[1:].isdigit()):
+            return None
+        port = rest[1:] or None
+    elif s.count(":") == 1 and s.rsplit(":", 1)[1].isdigit():
+        host, port = s.rsplit(":", 1)
+    else:
+        host, port = s, None
+    host = host.rstrip(".").strip()
+    return (host, port) if host else None
+
+
+def _host_matches(host: str, port: str | None, entry: tuple[str, str | None]) -> bool:
+    ehost, eport = entry
+    if eport is not None and eport != port:
+        return False
+    if "*" in host:
+        return False
+    if ehost.startswith("*."):
+        suffix = ehost[2:]
+        if "." not in suffix or "*" in suffix:  # `*`, `*.com`: too broad, never matches
+            return False
+        return host.endswith("." + suffix) and len(host) > len(suffix) + 1
+    if "*" in ehost:
+        return False
+    return host == ehost
+
+
+def excluded(hosts: list[str], out_hosts: list[str]) -> bool:
+    """True if any host matches an out-of-scope / excluded entry, ports ignored (a bounty
+    snapshot's out_of_scope and exclusions; Important 1)."""
+    entries = [(e[0], None) for e in (_norm_entry(s) for s in out_hosts or () if s and s.strip()) if e]
+    for h in hosts:
+        n = _norm_entry(h)
+        if n is not None and any(_host_matches(n[0], None, e) for e in entries):
+            return True
+    return False
+
+
+def scope_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str], out_hosts: list[str] = ()) -> str:
+    """`"unknown"` | `"none"` | `"out"` | `"in"` for hosts against scope entries.
+
+    Both sides are normalised (lowercase, trimmed, trailing dot dropped; scope
+    entries may carry a scheme/path/userinfo).  `*.example.com` matches
+    subdomains only (not the apex).  A scope entry with a port matches only that
+    port; one without matches any port.  A host *without* an explicit port only
+    matches scope entries *without* a port (scheme-default ports are not
+    guessed).  Any unparseable host is `out`.  A host matching `out_hosts` (see
+    `excluded`) makes the verdict `out` whatever else holds -- even when the text is
+    indirect, and even when an in-scope entry also matches it.
+    """
+    if excluded(hosts, out_hosts):
+        return "out"
+    if indirect:
+        return "unknown"
+    if not hosts:
+        return "none"
+    entries = [e for e in (_norm_entry(s) for s in scope_hosts if s and s.strip()) if e]
+    for h in hosts:
+        n = _norm_entry(h)
+        if n is None or not any(_host_matches(n[0], n[1], e) for e in entries):
+            return "out"
+    return "in"
+
+
+# Wildcard-DNS services that resolve `<ip>.<service>` (or every name under them) to an
+# address of the caller's choosing -- most to loopback.  Any name under one is an alias.
+WILDCARD_DNS_SUFFIXES = (
+    "nip.io", "sslip.io", "xip.io", "localtest.me", "lvh.me", "traefik.me", "local.gd", "vcap.me",
+    "lacolhost.com",
+)
+# Special-use / private names: they resolve to loopback or a local network, never the public web.
+_SPECIAL_TLDS = frozenset("localhost local internal lan home corp intranet localdomain arpa test invalid".split())
+_DNS_LABEL_RE = re.compile(r"^[a-z0-9_](?:[a-z0-9_\-]{0,61}[a-z0-9_])?$")
+_DNS_TLD_RE = re.compile(r"^(?:[a-z]{2,63}|xn--[a-z0-9\-]{1,59})$")
+_EMBEDDED_IP_LABEL_RE = re.compile(r"\d{1,3}-\d{1,3}-\d{1,3}-\d{1,3}|^[0-9a-f]{8}$")
+
+
+def plain_dns_name(host: str) -> bool:
+    """True only for an ordinary public multi-label DNS name.
+
+    False for IP literals in any spelling (dotted, shortened, decimal, hex, octal,
+    IPv6 / IPv4-mapped), `localhost` and other single-label or special-use names
+    (`.local`, `.internal`, `.localhost`, ...), wildcard-DNS services (`*.nip.io`,
+    `*.sslip.io`, ...), and names embedding an IPv4 address (`127.0.0.1.example.com`,
+    `127-0-0-1.x.com`, `7f000001.x.com`): each can be an alias of an in-scope host."""
+    if not host or host.startswith("[") or ":" in host:
+        return False
+    labels = host.split(".")
+    if len(labels) < 2 or not all(_DNS_LABEL_RE.match(label) for label in labels):
+        return False
+    if not _DNS_TLD_RE.match(labels[-1]) or labels[-1] in _SPECIAL_TLDS:
+        return False
+    if any(host == s or host.endswith("." + s) for s in WILDCARD_DNS_SUFFIXES):
+        return False
+    if any(_EMBEDDED_IP_LABEL_RE.search(label) for label in labels):
+        return False
+    numeric = [label.isdigit() for label in labels]
+    return not any(all(numeric[i : i + 4]) for i in range(len(labels) - 3))
+
+
+def _related(host: str, scope_host: str) -> bool:
+    """`host` equals, is a parent of, or is a subdomain of the scope entry's host (ports ignored)."""
+    base = scope_host[2:] if scope_host.startswith("*.") else scope_host
+    if not base or "*" in base:
+        return False
+    return host == base or host.endswith("." + base) or base.endswith("." + host)
+
+
+def fetch_verdict(hosts: list[str], indirect: bool, scope_hosts: list[str], out_hosts: list[str] = ()) -> str:
+    """`"in"` | `"out"` | `"unknown"` | `"excluded"` for a WebFetch URL (Ruling R14).
+
+    `"excluded"`: a host matches `out_hosts` (the program's out-of-scope / exclusions);
+    the gate denies it outright (recorded as `out`), it is never auto-allowed.
+
+    `"out"` -- the only verdict the gate auto-allows for WebFetch -- needs every
+    host to be a `plain_dns_name` that matches no scope entry even ignoring ports
+    and is neither a parent nor a subdomain of a scope host.  An exact in-scope
+    URL is `"in"`; everything else (aliases, IPs, port-only mismatches, no host,
+    indirection) is `"unknown"`: gated, and approving it needs scopeAck."""
+    if excluded(hosts, out_hosts):
+        return "excluded"
+    verdict = scope_verdict(hosts, indirect, scope_hosts)
+    if verdict in ("in", "unknown"):
+        return verdict
+    if verdict == "none":
+        return "unknown"
+    entries = [e for e in (_norm_entry(s) for s in scope_hosts if s and s.strip()) if e]
+    for h in hosts:
+        n = _norm_entry(h)
+        if n is None or not plain_dns_name(n[0]) or any(_related(n[0], e[0]) for e in entries):
+            return "unknown"
+    return "out"
+
+
+# ---------------------------------------------------------------- path rules
+
+
+def _real_home() -> str:
+    try:
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except KeyError:
+        return os.path.expanduser("~")
+
+
+def _abs_resolved(path: str) -> Path | None:
+    """Resolved absolute path, or None.  Relative paths are refused (the shell's
+    cwd is not observable); only `~` and `~/...` tilde forms are expanded."""
+    if not path or "\x00" in path:
+        return None
+    if path == "~" or path.startswith("~/"):
+        path = _real_home() + path[1:]
+    elif path.startswith("~"):
+        return None  # ~user, ~-, ~+, ~N ...
+    if not path.startswith("/"):
+        return None
+    try:
+        return Path(path).resolve()
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def _inside(path: str, workdir: Path) -> bool:
+    r = _abs_resolved(path)
+    if r is None:
+        return False
+    try:
+        return r.is_relative_to(Path(workdir).resolve())
+    except (OSError, ValueError, RuntimeError):
+        return False
+
+
+def _write_ok(path: str, workdir: Path) -> bool:
+    """Absolute path resolving inside workdir whose basename cannot be an option."""
+    return _inside(path, workdir) and not os.path.basename(path.rstrip("/")).startswith("-")
+
+
+def classify_write(path: str, workdir: Path) -> str:
+    """`"local"` if the path is absolute and resolves (symlinks, `..`, `~`) inside
+    workdir, else `"denied"`.  Relative paths are denied."""
+    return "local" if _inside(path, workdir) else "denied"
+
+
+# ---------------------------------------------------------------- bash parsing
+
+_OP_CHARS = set("|&;<>()")
+_SPLIT_OPS = {"|", "&&", "||", ";"}
+_REDIR_OPS = {">", ">>", ">|", "&>", "&>>"}
+
+
+class _Unparseable(Exception):
+    pass
+
+
+def _tokenize_full(cmd: str, glob_ok: bool = False) -> list[tuple[str, str, str]]:
+    """Minimal POSIX-ish tokenizer -> [("word"|"op", text)].  Raises on anything odd,
+    including (unless glob_ok) any unquoted glob char: globs can inject options."""
+    toks: list[tuple[str, str, str]] = []
+    wstart = 0
+    i, n = 0, len(cmd)
+    cur: list[str] = []
+    have = False
+    while i < n:
+        c = cmd[i]
+        if c in " \t":
+            if have:
+                toks.append(("word", "".join(cur), cmd[wstart:i]))
+                cur, have = [], False
+            i += 1
+        elif c in _OP_CHARS:
+            if have:
+                toks.append(("word", "".join(cur), cmd[wstart:i]))
+                cur, have = [], False
+            j = i
+            while j < n and cmd[j] in _OP_CHARS:
+                j += 1
+            toks.append(("op", cmd[i:j], cmd[i:j]))
+            i = j
+        elif c == "'":
+            end = cmd.find("'", i + 1)
+            if end < 0:
+                raise _Unparseable("unterminated '")
+            cur.append(cmd[i + 1 : end])
+            if not have:
+                wstart = i
+            have = True
+            i = end + 1
+        elif c == '"':
+            qs = i
+            i += 1
+            while True:
+                if i >= n:
+                    raise _Unparseable('unterminated "')
+                d = cmd[i]
+                if d == '"':
+                    i += 1
+                    break
+                if d == "\\":
+                    if i + 1 >= n:
+                        raise _Unparseable("dangling backslash")
+                    nxt = cmd[i + 1]
+                    cur.append(nxt if nxt in '"\\$`' else "\\" + nxt)
+                    i += 2
+                else:
+                    cur.append(d)
+                    i += 1
+            if not have:
+                wstart = qs
+            have = True
+        elif c == "\\":
+            if i + 1 >= n:
+                raise _Unparseable("dangling backslash")
+            cur.append(cmd[i + 1])
+            if not have:
+                wstart = i
+            have = True
+            i += 2
+        else:
+            if c in "*?[" and not glob_ok:
+                raise _Unparseable("unquoted glob")
+            cur.append(c)
+            if not have:
+                wstart = i
+            have = True
+            i += 1
+    if have:
+        toks.append(("word", "".join(cur), cmd[wstart:i]))
+    return toks
+
+
+def _tokenize(cmd: str, glob_ok: bool = False) -> list[tuple[str, str]]:
+    return [(k, v) for k, v, _ in _tokenize_full(cmd, glob_ok)]
+
+
+def _parse_opts(args, short_ok, short_val, long_ok, long_val):
+    """Strict option parse.  Returns positionals, or None if any option is unknown."""
+    pos: list[str] = []
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            pos.extend(args[i:])
+            break
+        if a.startswith("--"):
+            name, eq, _ = a.partition("=")
+            if name in long_val:
+                if not eq:
+                    i += 1
+            elif name not in long_ok or eq:
+                return None
+        elif a.startswith("-") and a != "-":
+            j = 1
+            while j < len(a):
+                ch = a[j]
+                if ch in short_val:
+                    if j + 1 == len(a):
+                        i += 1
+                    break
+                if ch not in short_ok:
+                    return None
+                j += 1
+        else:
+            pos.append(a)
+    return pos
+
+
+_AWK_BAD_RE = re.compile(r"system|getline|popen|close|ENVIRON|[|>@]")
+
+
+def _awk_ok(args: list[str]) -> bool:
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            continue
+        if a.startswith("-") and a != "-":
+            if a in ("-F", "-v"):
+                if i < len(args) and _AWK_BAD_RE.search(args[i]):
+                    return False
+                i += 1
+            elif a.startswith("-F") or (a.startswith("-v") and len(a) > 2):
+                pass
+            else:
+                return False
+        if _AWK_BAD_RE.search(a):
+            return False
+    return True
+
+
+_SED_ADDR = r"(?:\d+|\$|/(?:\\.|[^/\\])*/)"
+
+
+def _sed_script_safe(script: str) -> bool:
+    """Only plain substitution / print / delete / quit commands; no e, w, r, y, {} etc."""
+    pos, n = 0, len(script)
+    cmd_re = re.compile(rf"\s*(?:{_SED_ADDR}(?:,{_SED_ADDR})?)?\s*!?\s*([pdq]|s(.))")
+    while pos < n:
+        while pos < n and script[pos] in " \t;":
+            pos += 1
+        if pos >= n:
+            break
+        m = cmd_re.match(script, pos)
+        if not m:
+            return False
+        pos = m.end()
+        if m.group(2):  # s<delim>...: consume pattern, replacement, flags
+            d = re.escape(m.group(2))
+            part = rf"(?:\\.|(?!{d})[^\\])*{d}"
+            m2 = re.compile(rf"{part}{part}([gIip0-9]*)").match(script, pos)
+            if not m2:
+                return False
+            pos = m2.end()
+    return True
+
+
+def _sed_ok(args: list[str], workdir: Path) -> bool:
+    scripts: list[str] = []
+    files: list[str] = []
+    in_place = False
+    i = 0
+    while i < len(args):
+        a = args[i]
+        i += 1
+        if a == "--":
+            files.extend(args[i:])
+            break
+        if a.startswith("--"):
+            name, eq, val = a.partition("=")
+            if name in ("--quiet", "--silent", "--regexp-extended", "--posix", "--null-data", "--separate") and not eq:
+                continue
+            if name == "--in-place" and not eq:  # a backup suffix could point anywhere
+                in_place = True
+                continue
+            if name == "--expression":
+                if eq:
+                    scripts.append(val)
+                elif i < len(args):
+                    scripts.append(args[i])
+                    i += 1
+                else:
+                    return False
+                continue
+            return False
+        if a.startswith("-") and a != "-":
+            j = 1
+            while j < len(a):
+                ch = a[j]
+                if ch in "nEsrz":
+                    j += 1
+                elif ch == "i":
+                    if j + 1 != len(a):
+                        return False  # `-iSUFFIX`: backup file could land outside workdir
+                    in_place = True
+                    break
+                elif ch == "e":
+                    rest = a[j + 1 :]
+                    if rest:
+                        scripts.append(rest)
+                    elif i < len(args):
+                        scripts.append(args[i])
+                        i += 1
+                    else:
+                        return False
+                    break
+                else:
+                    return False
+        else:
+            files.append(a)
+    if not scripts:
+        if not files:
+            return False
+        scripts.append(files.pop(0))
+    if not all(_sed_script_safe(s) for s in scripts):
+        return False
+    return not in_place or all(_write_ok(f, workdir) for f in files)
+
+
+def _args_ok(head: str, args: list[str], workdir: Path) -> bool:
+    """Per-command safety for LOCAL_COMMANDS members (no exec / no write outside workdir)."""
+    if head == "awk":
+        return _awk_ok(args)
+    if head == "sed":
+        return _sed_ok(args, workdir)
+    if head == "tee":
+        pos = _parse_opts(args, "aip", "", {"--append", "--ignore-interrupts"}, set())
+        return pos is not None and all(_write_ok(p, workdir) for p in pos)
+    if head == "mkdir":
+        pos = _parse_opts(args, "pv", "", {"--parents", "--verbose"}, set())
+        return pos is not None and bool(pos) and all(_write_ok(p, workdir) for p in pos)
+    if head == "sort":
+        pos = _parse_opts(
+            args,
+            "nrufbdgihMVsRzcC",
+            "kt",
+            {
+                "--numeric-sort", "--reverse", "--unique", "--ignore-case", "--ignore-leading-blanks",
+                "--dictionary-order", "--general-numeric-sort", "--human-numeric-sort", "--month-sort",
+                "--version-sort", "--stable", "--zero-terminated", "--check", "--ignore-nonprinting",
+            },
+            {"--key", "--field-separator"},
+        )
+        return pos is not None
+    if head == "uniq":
+        pos = _parse_opts(
+            args,
+            "cdiuz",
+            "fsw",
+            {"--count", "--repeated", "--ignore-case", "--unique", "--zero-terminated"},
+            {"--skip-fields", "--skip-chars", "--check-chars"},
+        )
+        return pos is not None and all(_write_ok(p, workdir) for p in pos)
+    if head == "rg":
+        return not any(a.startswith(("--pre", "--hostname-bin")) for a in args)
+    if head == "file":
+        return not any(a.startswith("--c") or (a.startswith("-") and not a.startswith("--") and "C" in a) for a in args)
+    return True
+
+
+def classify_bash(command: str, workdir: Path) -> str:
+    """`"local"` only when the command provably stays local; otherwise `"gated"`.
+
+    Local means: every `|`/`&&`/`||`/`;` segment starts with a bare
+    `LOCAL_COMMANDS` name (so `env curl`, `bash -c`, `/usr/bin/curl` are gated);
+    no hosts, no indirection (`$VAR`, `$(..)`, backticks, `eval`, ...), no
+    `xargs`, no `&`, subshells, `<`, `<(`/`>(`, newlines; per-command argument
+    checks (awk/sed cannot exec or write, sort/rg/file cannot spawn programs);
+    and every `>`, `>>`, `tee`, `mkdir`, `sed -i` target resolves inside
+    `workdir` (`/dev/null` excepted).  Unparseable input is gated.
+    """
+    if not command or not command.strip() or any(c in command for c in "\n\r\x00"):
+        return "gated"
+    hosts, indirect = extract_hosts(command, file_like=False, strict=False)
+    if hosts or indirect:
+        return "gated"
+    try:
+        toks = _tokenize(command)
+    except _Unparseable:
+        return "gated"
+
+    segments: list[list[str]] = [[]]
+    i = 0
+    while i < len(toks):
+        kind, val = toks[i]
+        i += 1
+        if kind == "word":
+            if val == "xargs":
+                return "gated"
+            segments[-1].append(val)
+        elif val in _SPLIT_OPS:
+            segments.append([])
+        elif val in _REDIR_OPS or val == ">&":
+            if i >= len(toks) or toks[i][0] != "word":
+                return "gated"
+            target = toks[i][1]
+            i += 1
+            if val == ">&" and (target == "-" or target.isdigit()):
+                continue  # fd duplication, e.g. 2>&1
+            if target != "/dev/null" and not _write_ok(target, workdir):
+                return "gated"
+        else:
+            return "gated"  # &, (, ), <, <<, <(, >(, |&, ;; ...
+
+    cmds = [s for s in segments if s]
+    if not cmds:
+        return "gated"
+    for words in cmds:
+        head, args = words[0], words[1:]
+        if head not in LOCAL_COMMANDS or not _args_ok(head, args, workdir):
+            return "gated"
+    return "local"

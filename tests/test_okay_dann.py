@@ -70,3 +70,87 @@ def test_read_env_file(tmp_path):
     f.write_text("# comment\n\nR2_BUCKET='b'\nLITESTREAM_ACCESS_KEY_ID = \"k\"\nnoequals\n")
     assert od.read_env_file(f) == {"R2_BUCKET": "b", "LITESTREAM_ACCESS_KEY_ID": "k"}
     assert od.read_env_file(tmp_path / "missing.env") == {}
+
+
+def test_lab_release_asset_name():
+    # Real naming on juice-shop/juice-shop releases (v20.4.0): zip on macOS, tgz on Linux.
+    assert od.lab_release_asset("20.4.0", 26, "arm64", "darwin") == "juice-shop-20.4.0_node26_darwin_arm64.zip"
+    assert od.lab_release_asset("20.4.0", 22, "x86_64", "linux") == "juice-shop-20.4.0_node22_linux_x64.tgz"
+
+
+def test_lab_pick_node_major():
+    assets = ["juice-shop-20.4.0_node22_darwin_arm64.zip", "juice-shop-20.4.0_node24_darwin_arm64.zip"]
+    assert od.lab_pick_node_major(assets, 24, "arm64", "darwin") == 24
+    assert od.lab_pick_node_major(assets, 26, "arm64", "darwin") == 24  # highest published <= local
+    assert od.lab_pick_node_major(assets, 20, "arm64", "darwin") is None
+
+
+def test_lab_process_classified_as_service():
+    lab = od.LAB_DIR / "20.4.0" / "juice-shop_20.4.0" / "build" / "app.js"
+    assert od.classify(["node", str(lab)], ROOT) == "service"
+    assert od.classify(["/opt/homebrew/bin/node", str(lab)], ROOT) == "service"
+    assert od.classify(["node", "/elsewhere/build/app.js"], ROOT) is None
+    assert od.classify(["vim", str(lab)], ROOT) is None
+
+
+def test_lab_valid_tag():
+    for ok in ("v20.4.0", "20.4.0", "v21"):
+        assert od.lab_valid_tag(ok)
+    for bad in ("../x", "v1/../2", "v1.2.3-rc1", "", None, "v1.2.\n"):
+        assert not od.lab_valid_tag(bad)
+
+
+def test_lab_digest_requires_published_sha256(tmp_path):
+    import hashlib
+
+    f = tmp_path / "a.zip"
+    f.write_bytes(b"data")
+    good = "sha256:" + hashlib.sha256(b"data").hexdigest()
+    assert od.lab_digest_ok(f, {"name": "a.zip", "digest": good})
+    assert not od.lab_digest_ok(f, {"name": "a.zip"})  # no checksum published: refuse
+    assert not od.lab_digest_ok(f, {"name": "a.zip", "digest": None})
+    assert not od.lab_digest_ok(f, {"name": "a.zip", "digest": "sha256:" + "0" * 64})
+
+
+def _fake_lsof(monkeypatch, stdout="", returncode=0, missing=False):
+    import subprocess
+
+    def run(cmd, **kw):
+        if missing:
+            raise FileNotFoundError("lsof")
+        return subprocess.CompletedProcess(cmd, returncode, stdout, "")
+
+    monkeypatch.setattr(od.subprocess, "run", run)
+
+
+def test_lab_bind_ok_fails_closed(monkeypatch):
+    good = "p42\nf22\nn127.0.0.1:3000\n"
+    _fake_lsof(monkeypatch, good)
+    assert od.lab_bind_ok(42, wait=0) == (True, "")
+    for kwargs, word in (
+        ({"missing": True}, "lsof"),
+        ({"returncode": 1, "stdout": good}, "exit"),
+        ({"stdout": ""}, "no listening"),
+        ({"stdout": "p42\nf22\nn*:3000\n"}, "*:3000"),
+        ({"stdout": good + "f23\nn[::1]:3000\n"}, "[::1]:3000"),
+    ):
+        _fake_lsof(monkeypatch, **kwargs)
+        ok, reason = od.lab_bind_ok(42, wait=0)
+        assert not ok and word in reason, (kwargs, reason)
+
+
+def test_bind_shim_forces_loopback(tmp_path):
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node not installed")
+    shim = tmp_path / "shim.cjs"
+    shim.write_text(od.BIND_SHIM)
+    probe = Path(__file__).parent / "bind_shim_probe.js"
+    out = subprocess.run([node, "--require", str(shim), str(probe)], capture_output=True, text=True, timeout=30)
+    assert json.loads(out.stdout) == ["127.0.0.1"] * 5, out.stderr

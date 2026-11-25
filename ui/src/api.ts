@@ -1,5 +1,5 @@
 import { getJson, postJson } from "pnd-lib-react";
-import type { AgentPolicy, Bounties, CveNote, Finding, RunEvent, RunSummary, StartRunResponse, Submission } from "./types";
+import type { AgentPolicy, Bounties, CveNote, Engagement, EngagementDetail, EngagementQuestion, Finding, PendingGate, RunEvent, RunSummary, StartRunResponse, Submission } from "./types";
 
 export const getAgents = () => getJson<AgentPolicy[]>("/api/agents");
 
@@ -65,3 +65,33 @@ export const confirmProposal = (id: number) => postJson<{ snapshotId: number }>(
 export const rejectProposal = (id: number) => postJson(`/api/proposals/${id}/reject`);
 export const addProgram = (body: { name: string; url: string; platform?: string; policyText?: string }) =>
   postJson<{ programId: number }>("/api/programs", body);
+
+// ---- engagements ------------------------------------------------------------
+
+export interface NewEngagementBody {
+  name: string;
+  kind: "lab" | "bounty";
+  scopeHosts: string[];
+  scopeNotes: string;
+  authorization: string;
+  programId?: number;
+}
+
+const eng = (id: number) => `/api/engagements/${id}`;
+export const listEngagements = () => getJson<Engagement[]>("/api/engagements");
+export const createEngagement = (body: NewEngagementBody) => postJson<Engagement>("/api/engagements", body);
+export const getEngagement = (id: number) => getJson<EngagementDetail>(eng(id));
+export const startStage = (id: number, stage: string, body: { armed?: boolean; question?: string } = {}) =>
+  postJson<{ runId: string }>(`${eng(id)}/stages/${stage}/start`, body);
+export const skipStage = (id: number, stage: string) => postJson(`${eng(id)}/stages/${stage}/skip`, {});
+export const stopStage = (id: number, stage: string) => postJson(`${eng(id)}/stages/${stage}/stop`, {});
+/** Approves exactly the draft the operator was shown (`draftId`); the hub answers 409 if a newer draft exists or Planning is running. */
+export const approvePlan = (id: number, draftId: number) => postJson<{ planId: number }>(`${eng(id)}/plan/approve`, { draftId });
+export const revisePlan = (id: number, comment: string) => postJson(`${eng(id)}/plan/revise`, { comment });
+export const askQuestion = (
+  id: number,
+  body: { stage: string; question: string; actionId?: number; kind?: "ask" | "explain"; technique?: string }
+) => postJson<EngagementQuestion>(`${eng(id)}/ask`, body);
+export const decideAction = (actionId: number, body: { approve: boolean; message?: string; scopeAck?: boolean }) =>
+  postJson(`/api/gate/actions/${actionId}/decide`, body);
+export const getPendingGate = () => getJson<PendingGate>("/api/gate/pending");

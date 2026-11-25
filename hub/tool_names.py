@@ -7,6 +7,12 @@ from .db.tables import WRITE_TABLES
 SHARED_SERVER = "pnd-notes"
 SHARED_READ_TOOLS = [f"mcp__{SHARED_SERVER}__{t}" for t in ("list_areas", "search_notes", "get_note")]
 
+# The engagement approval gate (hub/gate.py): `declare_action` for the agent, and
+# `permission` as Claude Code's --permission-prompt-tool.
+GATE_SERVER = "ei-gate"
+PERMISSION_TOOL = f"mcp__{GATE_SERVER}__permission"
+DECLARE_TOOL = f"mcp__{GATE_SERVER}__declare_action"
+
 # Read tools every agent's memory server exposes.
 READ_TOOLS = ["find_prior_work", "search_reports", "get_report", "get_cve_note", "list_programs", "get_scope"]
 

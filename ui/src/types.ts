@@ -185,6 +185,8 @@ export interface ConfirmedProgram extends Program {
     exclusions: string[];
     confirmedAt: string;
     stale: boolean;
+    /** In-scope hosts the hub derives from this snapshot: exactly what a bounty engagement gets. */
+    scopeHosts: string[];
   };
 }
 
@@ -192,4 +194,94 @@ export interface Bounties {
   leads: Lead[];
   tracked: Program[];
   confirmed: ConfirmedProgram[];
+}
+
+// ---- engagements ------------------------------------------------------------
+
+export type StageName = "discovery" | "planning" | "web" | "api" | "analysis" | "reporting" | "research";
+export type StageStatus = "locked" | "ready" | "running" | "awaiting-approval" | "done" | "failed" | "stopped" | "skipped";
+export type ScopeVerdict = "in" | "out" | "unknown" | "none";
+
+export interface Engagement {
+  id: number;
+  slug: string;
+  name: string;
+  kind: "lab" | "bounty";
+  scope_hosts: string[];
+  scope_notes: string;
+  authorization: string;
+  program_id: number | null;
+  snapshot_id: number | null;
+  created_at: string;
+}
+
+export interface StageView {
+  stage: StageName;
+  agent: string;
+  status: StageStatus;
+  runId: string | null;
+  stageId: number | null;
+  armed: boolean;
+  canArm: boolean;
+  pending: number;
+  history: string[];
+  planError: string | null;
+  canStart: boolean;
+}
+
+export interface PlanStage {
+  include: boolean;
+  targets?: string[];
+  focus?: string;
+}
+export interface Plan {
+  stages: Partial<Record<StageName, PlanStage>>;
+  research?: string[];
+}
+/** A plan_drafts row (the draft) or an ops_plans row (the approved plan). */
+export interface PlanRow {
+  id: number;
+  plan: Plan;
+  /** ops_plans only: the plan_drafts id it approved. Compare this with the draft's `id`, never the two ids. */
+  draft_id?: number;
+}
+
+/** A gated action waiting on the operator (also the shape /api/gate/pending returns). */
+export interface GateAction {
+  id: number;
+  engagement_id: number;
+  run_id: string;
+  stage: StageName;
+  tool_name: string;
+  target: string;
+  why: string;
+  technique: string;
+  risk: string;
+  hosts: string[];
+  verdict: ScopeVerdict;
+  created_at: string;
+}
+
+export interface EngagementQuestion {
+  id: number;
+  stage: StageName;
+  action_id: number | null;
+  kind: "ask" | "explain";
+  question: string;
+  technique: string | null;
+  answer: string | null;
+  created_at: string;
+}
+
+export interface EngagementDetail {
+  engagement: Engagement;
+  stages: StageView[];
+  plan: { draft: PlanRow | null; approved: PlanRow | null };
+  pending: GateAction[];
+  questions: EngagementQuestion[];
+}
+
+export interface PendingGate {
+  count: number;
+  items: GateAction[];
 }

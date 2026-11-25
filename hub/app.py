@@ -26,7 +26,18 @@ from .db.bounties import (
     require_confirmed_snapshot,
     track_lead,
 )
+from .db.pipeline import (
+    approve_plan,
+    approved_plan,
+    create_engagement,
+    get_engagement,
+    latest_plan_draft,
+    list_engagements,
+    stop_orphaned_stages,
+)
 from .db.read import current, parse_json
+from .gate_service import decide, expire_orphaned, pending_actions
+from .pipeline import STAGES, ask, live_check, revise_plan, skip_stage, stage_view, start_stage, validate_plan
 from .policies import load_policies
 from .runner import Runner
 
@@ -134,6 +145,12 @@ class Hub:
         interrupted = mark_interrupted(self.db)
         if interrupted:
             print(f"[archive] marked {interrupted} unfinished run(s) interrupted")
+        expired = expire_orphaned(self.db, set())  # no run is live yet: nothing can still be waiting
+        if expired:
+            print(f"[gate] expired {expired} orphaned pending action(s)")
+        stopped = stop_orphaned_stages(self.db, set())
+        if stopped:
+            print(f"[pipeline] marked {stopped} unfinished stage(s) stopped")
         self.runner = Runner(self.db, self.db_file, self.data_dir, claude_cmd, self.repo_root)
 
         db = self.db
@@ -152,6 +169,17 @@ class Hub:
             ("POST", r"/api/leads/track", lambda m, q, b: {"programId": track_lead(db, _lead_url(b))}),
             ("POST", r"/api/leads/dismiss", lambda m, q, b: dismiss_lead(db, _lead_url(b))),
             ("POST", r"/api/proposals/([^/]+)/confirm", lambda m, q, b: {"snapshotId": confirm_proposal(db, _proposal_id(m.group(1)))}),
+            ("GET", r"/api/engagements", lambda m, q, b: list_engagements(db)),
+            ("POST", r"/api/engagements", lambda m, q, b: self.new_engagement(b)),
+            ("GET", r"/api/engagements/(\d+)", lambda m, q, b: self.engagement_detail(m.group(1))),
+            ("POST", r"/api/engagements/(\d+)/stages/([^/]+)/start", lambda m, q, b: self.stage_start(m.group(1), m.group(2), b)),
+            ("POST", r"/api/engagements/(\d+)/stages/([^/]+)/skip", lambda m, q, b: self.stage_skip(m.group(1), m.group(2))),
+            ("POST", r"/api/engagements/(\d+)/stages/([^/]+)/stop", lambda m, q, b: self.stage_stop(m.group(1), m.group(2))),
+            ("POST", r"/api/engagements/(\d+)/plan/approve", lambda m, q, b: self.plan_approve(m.group(1), b)),
+            ("POST", r"/api/engagements/(\d+)/plan/revise", lambda m, q, b: revise_plan(self, self._eng(m.group(1))["id"], b.get("comment"))),
+            ("POST", r"/api/engagements/(\d+)/ask", lambda m, q, b: self.engagement_ask(m.group(1), b)),
+            ("POST", r"/api/gate/actions/(\d+)/decide", lambda m, q, b: self.gate_decide(m.group(1), b)),
+            ("GET", r"/api/gate/pending", lambda m, q, b: self.gate_pending()),
             ("POST", r"/api/proposals/([^/]+)/reject", lambda m, q, b: reject_proposal(db, _proposal_id(m.group(1)))),
         ]
         if self.prefs_file:
@@ -183,6 +211,128 @@ class Hub:
             raise HttpError(404, "no such run")
         reports = self.db.all("SELECT id, agent, kind, text, meta, created_at FROM reports WHERE run_id = ? ORDER BY id", run_id)
         return {**run, "reports": [{**r, "meta": parse_json(r["meta"], None)} for r in reports]}
+
+    # ---- engagement pipeline ----
+
+    def _eng(self, raw_id):
+        eng = get_engagement(self.db, int(raw_id))
+        if eng is None:
+            raise HttpError(404, "no such engagement")
+        return eng
+
+    @staticmethod
+    def _stage_name(stage):
+        if stage not in STAGES:
+            raise HttpError(400, f"unknown stage: {stage}")
+        return stage
+
+    @staticmethod
+    def _flag(body, field, required=False):
+        if field not in body:
+            if required:
+                raise HttpError(400, f"{field} must be true or false")
+            return False
+        if not isinstance(body[field], bool):
+            raise HttpError(400, f"{field} must be true or false")
+        return body[field]
+
+    def new_engagement(self, body):
+        for field in ("name", "scopeNotes", "authorization"):
+            if body.get(field) is not None and not isinstance(body[field], str):
+                raise HttpError(400, f"{field} must be a string")
+        hosts = body.get("scopeHosts", [])
+        if not isinstance(hosts, list) or not all(isinstance(h, str) for h in hosts):
+            raise HttpError(400, "scopeHosts must be a list of strings")
+        program_id = body.get("programId")
+        # The snapshot is never taken from the body: create_engagement re-derives it for bounty engagements.
+        return create_engagement(
+            self.db, body.get("name"), body.get("kind"), hosts, body.get("scopeNotes"), body.get("authorization"), program_id=program_id
+        )
+
+    def _pending_view(self, engagement_id=None):
+        keys = ("id", "engagement_id", "run_id", "stage", "tool_name", "target", "why", "technique", "risk", "hosts", "verdict", "created_at")
+        return [{k: a.get(k) for k in keys} for a in pending_actions(self.db, engagement_id)]
+
+    def engagement_detail(self, raw_id):
+        eng = self._eng(raw_id)
+        draft = latest_plan_draft(self.db, eng["id"])
+        questions = self.db.all(
+            "SELECT id, stage, action_id, kind, question, technique, answer, created_at FROM gate_questions WHERE engagement_id = ? ORDER BY id",
+            eng["id"],
+        )
+        return {
+            "engagement": eng,
+            "stages": stage_view(self.db, eng["id"], live_check(self)),
+            "plan": {"draft": draft, "approved": approved_plan(self.db, eng["id"])},
+            "pending": self._pending_view(eng["id"]),
+            "questions": questions,
+        }
+
+    def stage_start(self, raw_id, stage, body):
+        eng = self._eng(raw_id)
+        return start_stage(self, eng["id"], self._stage_name(stage), armed=self._flag(body, "armed"), question=body.get("question"))
+
+    def stage_skip(self, raw_id, stage):
+        eng = self._eng(raw_id)
+        skip_stage(self.db, eng["id"], self._stage_name(stage), live=live_check(self))
+
+    def stage_stop(self, raw_id, stage):
+        eng = self._eng(raw_id)
+        rows = self.db.all(
+            "SELECT run_id FROM ops_stages WHERE engagement_id = ? AND stage = ? AND status = 'running' AND run_id IS NOT NULL",
+            eng["id"], self._stage_name(stage),
+        )
+        # Only runs still going count: a run stopped a moment ago keeps its 'running' row until it is archived.
+        live = [r["run_id"] for r in rows if getattr(self.runner.get(r["run_id"]), "status", None) == "running"]
+        stopped = [run_id for run_id in live if self.runner.stop(run_id)]
+        if not stopped:
+            raise HttpError(400, f"the {stage} stage has no running run")
+        return {"stopped": stopped}
+
+    def plan_approve(self, raw_id, body):
+        """Approve the draft the operator saw (`draftId`): 409 if it is no longer the latest, or while Planning runs."""
+        eng = self._eng(raw_id)
+        draft_id = body.get("draftId")
+        if type(draft_id) is not int:  # bool is an int subclass; never accept it (or "1", 1.0) as an id
+            raise HttpError(400, "draftId must be an integer")
+        draft = latest_plan_draft(self.db, eng["id"])
+        if draft is None:
+            raise HttpError(400, "no plan draft to approve")
+        planning = next(s for s in stage_view(self.db, eng["id"], live_check(self)) if s["stage"] == "planning")
+        if planning["status"] in ("running", "awaiting-approval"):
+            raise HttpError(409, "the planning stage is still running; wait for its draft before approving")
+        if draft["id"] != draft_id:
+            raise HttpError(409, "that is not the latest plan draft; review the new draft first")
+        error = validate_plan(draft["plan"])
+        if error:
+            raise HttpError(400, error)
+        return {"planId": approve_plan(self.db, eng["id"], draft_id)}
+
+    def engagement_ask(self, raw_id, body):
+        eng = self._eng(raw_id)
+        stage = self._stage_name(body.get("stage"))
+        q = ask(
+            self, eng["id"], stage, body.get("question"),
+            action_id=body.get("actionId"), kind=body.get("kind") or "ask", technique=body.get("technique"),
+        )
+        # Same snake_case shape as the detail view's `questions` items.
+        return {
+            "id": q["id"], "stage": q["stage"], "action_id": q["actionId"], "kind": q["kind"], "question": q["question"],
+            "technique": q["technique"], "answer": q["answer"], "created_at": q["createdAt"],
+        }
+
+    def gate_decide(self, raw_id, body):
+        # GateRefused (an out-of-scope approval, or unknown scope without scopeAck) is a 409; see HubHandler.api.
+        approve = self._flag(body, "approve", required=True)
+        scope_ack = self._flag(body, "scopeAck")
+        message = body.get("message") or ""
+        if not isinstance(message, str):
+            raise HttpError(400, "message must be a string")
+        return decide(self.db, int(raw_id), approve, message, scope_ack)
+
+    def gate_pending(self):
+        items = self._pending_view()
+        return {"count": len(items), "items": items}
 
     def read_prefs(self):
         try:
@@ -297,7 +447,7 @@ class HubHandler(BaseHTTPRequestHandler):
             except HttpError as err:
                 return self.send_json(err.status, {"error": str(err)})
             except (ValueError, TypeError, PermissionError) as err:
-                return self.send_json(400, {"error": str(err)})
+                return self.send_json(getattr(err, "status", 400), {"error": str(err)})
             except Exception as err:
                 print(f"[api] {method} {path}: {err!r}", file=sys.stderr)
                 return self.send_json(500, {"error": str(err)})

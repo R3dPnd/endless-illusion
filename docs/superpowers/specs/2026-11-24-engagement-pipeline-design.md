@@ -47,7 +47,10 @@ confirmed scope snapshot).
 - Approval of passive actions (option C, rejected). Reading, web searches and CVE lookups run
   freely inside an approved stage.
 - Multi-user use, remote approval (phone or Slack) and scheduling.
-- Replacing the Console's free-form single runs, which stay for ad-hoc work.
+- Replacing the Console's free-form single runs, which stay for ad-hoc work. (Ruling R13: a
+  Console run whose toolset has Write/Edit/MultiEdit/NotebookEdit gets a fail-closed
+  writes-only PreToolUse hook, `gate.py --hook --writes-only`, that confines those tools to
+  `<repo>/research/`, so no run outside the gate can rewrite the gate or the policies.)
 
 **Anti-goals** (failure even if everything technically works)
 - **Permission enforced only by the AI.** If any path lets an agent send target traffic, or start
@@ -74,7 +77,11 @@ confirmed scope snapshot).
   new tables that agents cannot write.
 - **Scope authority.** For a bounty engagement, scope comes from the operator-confirmed snapshot
   (`scope_snapshots`), never from the request. For a lab engagement, the operator enters scope
-  hosts when creating it.
+  hosts when creating it. (Final review I1: a bounty engagement's scope hosts are derived from the
+  snapshot's in_scope assets, `hub/db/scope.py` `snapshot_scope`; operator hosts may only narrow
+  them. Hosts named by the snapshot's out_of_scope or exclusions are always `out` at the gate, even
+  if in_scope matches them, and a WebFetch to one is denied. A stale snapshot, over 30 days, cannot
+  arm a stage.)
 - **Litestream** replicates the DB to R2. Nothing here needs special handling for it.
 - **Platform:** macOS. Docker is not installed and Node is, so Juice Shop runs from npm or its
   release package.
@@ -96,6 +103,118 @@ long-polls the hub for a decision. The rest of the design is unchanged by that s
 The same first task also verifies `claude -p --resume <session> --fork-session` against a
 session that is still running (§5.5). The fallback is to allow "Ask" only while a stage is
 idle or paused at a gate, answering from a fork taken at the pause.
+
+**Verification results (Task 1)** — Claude Code 2.1.331, real `claude -p --model haiku` runs
+against a stdio MCP spike server exposing one tool, `permission`:
+
+- **Mechanism: `--permission-prompt-tool mcp__<server>__<tool>` works, but "no hook fallback
+  needed" is superseded: see "Follow-up" and "Fix round 1" below. The `PreToolUse` hook is the
+  primary gate, because the permission tool alone misses auto-allowed calls.**
+  `--permission-prompts host` is the default and is not required (the flag can be omitted; with
+  `host` but no tool, un-allowed tools are just refused and the agent is told to ask the user).
+- **Which calls reach the tool:** only calls that would otherwise prompt. Read-only Bash such as
+  `echo hi` is auto-allowed by Claude Code and never reaches the tool; `echo hi > hi.txt` does.
+  Tasks 4/5 test with a write-style command.
+- **Request** (`tools/call` params; `arguments` is exactly this, `_meta` is extra):
+  ```json
+  {"name":"permission","arguments":{"tool_name":"Bash",
+    "input":{"command":"echo hi > hi.txt","description":"Run echo hi redirected to hi.txt"},
+    "tool_use_id":"toolu_013xiA1ANVx14Fi7pRSySaVg"},
+   "_meta":{"claudecode/toolUseId":"toolu_013xiA1ANVx14Fi7pRSySaVg","progressToken":2}}
+  ```
+  `tool_name` string, `input` object (the tool's own input), `tool_use_id` string.
+- **Reply** is one MCP text content whose text is a JSON string:
+  - allow: `{"behavior":"allow","updatedInput":{…}}` runs the (possibly edited) input.
+    `{"behavior":"allow"}` alone also works and runs the original input, so `updatedInput`
+    is optional (echo `input` back anyway to be safe).
+  - deny: `{"behavior":"deny","message":"Operator denied: …"}`. The command does not run, and the
+    message reaches the agent verbatim as the tool_result (`is_error:true`); the agent
+    stops and reports it. The stream's final `result` event also lists it under `permission_denials`.
+- **Blocking:** the session waits for the tool's reply for as long as it takes (tested 25s) and
+  then continues normally with the same session id; nothing times out at that length.
+- **Fork while running: works.** While the original was blocked in the permission tool,
+  `claude -p --model haiku --tools Read --resume <id> --fork-session -- "what were you about to run and why?"`
+  answered correctly ("`echo hi > hi.txt` because you asked me to…, the call was interrupted"),
+  under a new session id, and the original then continued and completed unaffected. Gotchas:
+  `--tools` is variadic, so put the prompt after `--` (or before the flag); and the fork sees the
+  pending tool call as interrupted. No need to restrict Ask to paused stages.
+
+**Follow-up: guaranteeing every gated call reaches the hub (verified)**
+
+- **The permission tool alone is NOT enough.** Claude Code's config auto-allow (read-only
+  Bash such as `echo hi`; decision `source:"config", reason_type:"subcommandResults"`) is
+  decided before the permission tool is consulted. `--permission-mode manual` and `default`
+  do not change this: `echo hi` still bypassed the tool in both.
+- **A `PreToolUse` hook fires for auto-allowed calls** (via `--settings <json>`, matcher
+  `"Bash|WebFetch|Write|Edit"`, `"timeout": 3600`). Hook stdin JSON:
+  ```json
+  {"session_id":"…","transcript_path":"…","cwd":"…","prompt_id":"…","permission_mode":"default",
+   "effort":{"level":"medium"},"hook_event_name":"PreToolUse","tool_name":"Bash",
+   "tool_input":{"command":"echo hi","description":"Run echo hi"},"tool_use_id":"toolu_…"}
+  ```
+- **Hook reply `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"ask"}}`
+  overrides the auto-allow:** `echo hi` then reached `--permission-prompt-tool` with the normal
+  request (`tool_name`, `input`, `tool_use_id`), and the tool's deny message reached the agent.
+- **The hook can block as long as needed:** with `"timeout": 3600`, a hook that slept 25s then
+  returned `permissionDecision:"allow"` held the run for ~27s, then `echo hi` ran
+  (`permission_decision` `{"decision":"accept","source":"hook"}`).
+- **Hook deny:** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny",
+  "permissionDecisionReason":"…"}}` blocks the call; the agent receives
+  `PreToolUse:Bash hook error: <reason>` (`is_error:true`) and stops.
+- **Env:** the hook process inherits the claude process's environment (`EI_RUN_ID=test` set on
+  spawn was visible to the hook).
+- **Recommendation:** use the hook as the single gate. It sees every Bash/WebFetch/Write/Edit
+  call (including auto-allowed ones) with the full input and run env, can block while the
+  operator decides, and returns allow/deny with a reason that reaches the agent. Having the hook
+  return `"ask"` and keep `--permission-prompt-tool` too is workable but redundant; if both are
+  used, the hook must return `ask` for every call, otherwise auto-allowed ones skip the tool.
+  Do not rely on `--permission-prompt-tool` alone.
+- **Hook reply channel:** JSON on stdout with exit 0 (the shapes above), or exit 2 with the
+  reason on stderr. Nothing else is a decision (see failure modes).
+- **Scope of these results:** all behaviour here is for Claude Code 2.1.331 and is
+  version-sensitive; re-run these checks on every Claude Code upgrade. `--settings` merges
+  with project/user settings; it is unverified whether project settings can disable or
+  override the hook.
+- Test caveat: `--mcp-config` pointing at a missing server script makes the permission tool
+  error with "not found. Available MCP tools: none"; check `mcp_servers[].status` in the init event.
+
+**Fix round 1: hook failure modes, precedence, modes (verified, `echo hi`, haiku, 2.1.331)**
+
+- **Failure modes: almost everything fails OPEN.** With `echo hi` (otherwise auto-allowed):
+
+  | Hook behaviour | Result |
+  |---|---|
+  | exit 1 (stderr text) | call RUNS (fail open) |
+  | exit 2 (reason on stderr) | call BLOCKED; agent gets `PreToolUse:Bash hook error: [cmd]: <stderr>` |
+  | invalid JSON on stdout, exit 0 | call RUNS (fail open) |
+  | no output, exit 0 | call RUNS (fail open) |
+  | uncaught Python exception (traceback, exit 1) | call RUNS (fail open) |
+  | explicit deny JSON, exit 0 | call BLOCKED |
+
+  **Requirement:** the gate hook must wrap everything in a catch-all and, on any exception
+  (including hub/DB unreachable, bad input, internal bug), fail closed by printing the explicit
+  deny JSON (or exiting 2). Only a deliberate `allow`/`ask` reply may let a call proceed.
+- **Hook timeout expiry fails OPEN.** With `"timeout": 5` and a hook sleeping 15s, Claude Code
+  abandoned the hook after about 5s and the call ran (`source:"config"`, run took 7.5s).
+  **Requirement:** the hook enforces its own deadline strictly below the configured timeout
+  (e.g. 3600s configured, internal deadline a few seconds less) and prints the deny JSON on
+  expiry, so Claude Code's timeout never fires.
+- **Matcher must equal the gated tool set.** The hook runs only for tools matching the
+  `matcher`; any tool outside it falls through to the config auto-allow or the permission tool.
+  Set the matcher to exactly the gated set: `Bash|WebFetch|Write|Edit` plus `NotebookEdit` if
+  the agent's tool list includes it, and keep it in sync with the per-agent tool policy.
+- **Permission modes.** The hook fired and denied under `--permission-mode` `acceptEdits`,
+  `dontAsk` and `default` (deny verified: `permission_decision` `reject`, `source:"hook"`).
+  `manual` does not stop the auto-allow (earlier). **Requirement:** the gate pins the mode
+  explicitly (`--permission-mode default`) on every spawn and does not inherit one; hook deny
+  was verified under `default`. `bypassPermissions` was not tested and must never be used.
+- **Precedence (hook vs config vs permission tool):**
+  - Hook `allow` on a call that would otherwise prompt (`echo hi > f1.txt`, Bash not in
+    allowedTools) runs it and the permission tool is NOT called (`source:"hook"`).
+  - Hook `deny` beats an `--allowedTools "Bash(echo:*)"` match: blocked, file not created.
+  - Hook `ask` overrides an `--allowedTools` match too: the call went to the permission tool
+    (its deny message reached the agent, file not created).
+  So the hook's decision is final for allow/deny, and `ask` forces the permission tool.
 
 ## 5. Design (decided with the operator)
 
@@ -125,7 +244,7 @@ idle or paused at a gate, answering from a fork taken at the pause.
   `authorized_active` toolset, which is what gives it Bash.
   - **Web and API:** each stage's Start control carries an **Arm** checkbox. It can only be
     ticked when the engagement has an authorization basis, plus a confirmed scope snapshot for
-    a bounty engagement.
+    a bounty engagement whose snapshot is not stale (over 30 days).
   - **Discovery:** starts passive. It can be armed separately, which is active scanning, under
     the same conditions.
   - **Planning, Analysis and Reporting:** never arm.
@@ -171,11 +290,16 @@ idle or paused at a gate, answering from a fork taken at the pause.
   logged in the stage history. The classifier needs thorough tests, since a mistake here lets
   traffic through.
 - `WebFetch` when the URL's host matches a host in the engagement scope, including subdomains of
-  wildcard entries;
+  wildcard entries; **and (Ruling R14) every WebFetch whose host is not a plain public multi-label
+  DNS name unrelated to the scope**: IP literals in any spelling (`127.1`, `2130706433`,
+  `0x7f.1`, `[::ffff:127.0.0.1]`), `localhost` and single-label or special-use names,
+  wildcard-DNS services (`*.nip.io`, `*.sslip.io`, `*.xip.io`, `*.localtest.me`, `*.lvh.me`),
+  names embedding an IPv4 address, parents or subdomains of a scope host, and port-only
+  mismatches. These get verdict `unknown`, so approving them needs scopeAck;
 - any future target-touching tool listed in a policy as gated.
 
 Everything else in the stage's toolset runs without asking: Read, Grep, WebSearch, WebFetch to
-other hosts, and the memory and notes tools.
+plain, unrelated public hosts (`nvd.nist.gov`, `github.com`), and the memory and notes tools.
 
 **Mechanism:**
 - Gated tools are left out of `--allowedTools`, so Claude Code consults the permission prompt

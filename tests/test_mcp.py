@@ -16,9 +16,9 @@ SERVER = HUB_DIR / "memory.py"
 
 
 class McpClient:
-    def __init__(self, agent, db_file):
+    def __init__(self, agent, db_file, extra=()):
         self.proc = subprocess.Popen(
-            [sys.executable, str(SERVER), "--agent", agent, "--db", str(db_file)],
+            [sys.executable, str(SERVER), "--agent", agent, "--db", str(db_file), *extra],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
@@ -130,3 +130,32 @@ def test_answers_ping_and_unknown_methods(clients):
     c = clients[0]["sin-of-friday"]
     assert c.request("ping")["result"] == {}
     assert c.request("resources/list")["error"]["code"] == -32601
+
+
+@pytest.mark.parametrize(
+    "argv,expected",
+    [
+        ([], (False, None)),
+        (["--read-only"], (True, None)),
+        (["--write-tools", "save_web_finding"], (False, ["save_web_finding"])),
+        (["--write-tools", "a,,b"], (False, ["a", "b"])),
+        (["--write-tools"], (True, [])),  # missing value: read-only, never "all write tools"
+        (["--write-tools", ""], (True, [])),
+        (["--write-tools", ","], (True, [])),
+        (["--write-tools", "--read-only"], (True, [])),
+    ],
+)
+def test_write_limits(argv, expected):
+    from hub.memory import write_limits
+
+    assert write_limits(["--agent", "x", "--db", "y", *argv]) == expected
+
+
+@pytest.mark.parametrize("extra", [["--write-tools"], ["--write-tools", ""]])
+def test_empty_write_tools_flag_starts_read_only(clients, extra):
+    c = McpClient("diablo-of-monday", clients[1], extra=extra)
+    try:
+        names = {t["name"] for t in c.request("tools/list")["result"]["tools"]}
+    finally:
+        c.close()
+    assert names == set(READ_TOOLS)

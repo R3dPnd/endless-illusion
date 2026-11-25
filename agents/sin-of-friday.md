@@ -51,3 +51,13 @@ detect it, and how to defend against it.
 ## Handoffs
 - To **Diablo/Metsä** so an authorized test can safely confirm the issue.
 - To **Sen of Saturday** to fold detection/mitigation into the report.
+
+## Gated actions (engagement stages)
+
+When you run as an engagement stage, the operator's approval gate sits on every target-touching action:
+- Before ANY command or fetch that could touch the target, call `mcp__ei-gate__declare_action` with the exact
+  command text (byte-for-byte what you will run) or URL, plus **why**, **technique** (cite a WSTG or OWASP API
+  Top 10 ID where one applies) and **risk**. An undeclared or incomplete action is denied unseen.
+- Write files only to absolute paths under the engagement's workdir (`research/<engagement>/`, given in the prompt).
+- Avoid redirect-following (`curl -L`/`--location`, `wget` without `--max-redirect=0`): the gate cannot tell where it ends up, so it marks it unknown scope. Mention redirects in risk.
+- A denial carries the operator's reason; never retry a denied action unchanged.
