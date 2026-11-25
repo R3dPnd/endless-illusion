@@ -595,6 +595,9 @@ def test_fetch_verdict_plain_unrelated_is_out_and_exact_is_in():
         "wget --max-redirect=1 in.scope.com",
         "wget --max-redirect 5 in.scope.com",
         "wget --max-redirect=0 in.scope.com ; wget in.scope.com",  # each wget needs its own
+        "wget --max-redirect=0 --max-redirect=5 in.scope.com",  # wget honours the last value
+        "wget --max-redirect 0 --max-redirect 9 in.scope.com",
+        "wget --max-redirect=0 --max-redirect 3 in.scope.com",
         "http --follow in.scope.com",
     ],
 )
@@ -607,6 +610,7 @@ def test_redirect_following_is_indirect(cmd):
 @pytest.mark.parametrize(
     "cmd",
     ["wget --max-redirect=0 in.scope.com", "wget --max-redirect 0 -q in.scope.com", "wget -q --max-redirect=0 -r in.scope.com",
+     "wget --max-redirect=5 --max-redirect=0 in.scope.com",
      "curl -s in.scope.com"],
 )
 def test_no_redirect_shapes_stay_in(cmd):

@@ -208,6 +208,17 @@ _REDIRECT_GUARD: dict[str, tuple[str, str]] = {"wget": ("--max-redirect", "0")}
 def _guards(head: str, flag: str, value: str) -> bool:
     guard = _REDIRECT_GUARD.get(head)
     return guard is not None and flag == guard[0] and value.isdigit() and int(value) == int(guard[1])
+
+
+def _guard_after(head: str, flag: str, value: str, guarded: bool) -> bool:
+    """The segment's guard state after `flag value`. The program honours the LAST
+    redirect-limit flag it sees (`wget --max-redirect=0 --max-redirect=5` follows
+    5 redirects), so each occurrence of the guard flag replaces the state; any
+    other flag leaves it unchanged."""
+    guard = _REDIRECT_GUARD.get(head)
+    if guard is None or flag != guard[0]:
+        return guarded
+    return _guards(head, flag, value)
 _NO_FLAGS: dict[str, str] = {}  # interpreters, local commands, anything else
 _LONG_FLAG_RE = re.compile(r"^--[A-Za-z][A-Za-z0-9\-]*$")
 _METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
@@ -284,7 +295,7 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
             expect = None
             if not ok:
                 return True
-            guarded = guarded or _guards(head, expect_flag, val)
+            guarded = _guard_after(head, expect_flag, val, guarded)
             continue
         if val == "--":
             continue
@@ -300,7 +311,7 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
                 if eq:
                     if kind_ == "bool" or not check(kind_, value):
                         return True
-                    guarded = guarded or _guards(head, name, value)
+                    guarded = _guard_after(head, name, value, guarded)
                 elif kind_ != "bool":
                     expect, expect_flag = kind_, name
                 continue
