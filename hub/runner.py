@@ -462,6 +462,8 @@ class Runner:
                 "finish",
                 lambda: finish_run(self.db, run_id, run.status, result.get("total_cost_usd"), result.get("duration_ms")),
             )
+            # However the run ended, nothing of it may still await the operator (its waiter gets deny).
+            archive("gate", lambda: cancel_for_run(self.db, run_id))
             if run.stageId is not None:
                 archive("stage", lambda: set_stage_status(self.db, run.stageId, STAGE_STATUS.get(run.status, "failed")))
             if on_finish:

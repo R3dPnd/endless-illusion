@@ -203,6 +203,22 @@ def test_stop_cancels_pending_action(api, fake, tmp_path, monkeypatch):
     assert stage_row(hub, sid)["status"] == "stopped"
 
 
+def test_natural_finish_cancels_pending_action(api, fake, tmp_path, monkeypatch):
+    """M3: no pending card outlives its run, even when the run ends by itself."""
+    hub, _ = api
+    hold = tmp_path / "hold"
+    hold.write_text("", encoding="utf8")
+    monkeypatch.setenv("FAKE_HOLD_FILE", str(hold))
+    run, sid = start_stage(hub)
+    aid, _ = hub.db.run(
+        "INSERT INTO gate_actions (run_id, tool_name, verdict, status, created_at) VALUES (?, 'Bash', 'in', 'pending', ?)", run.id, now_iso())
+    hold.unlink()
+    wait(hub, run.id)
+    assert run.status == "done"
+    assert hub.db.get("SELECT status FROM gate_actions WHERE id = ?", aid)["status"] == "cancelled"
+    assert stage_row(hub, sid)["status"] == "done"
+
+
 def test_startup_expires_orphaned_pending(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
