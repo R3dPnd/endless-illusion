@@ -155,15 +155,19 @@ def _flag_table(bool_: str = "", method: str = "", num: str = "", value: str = "
 # listed for its program -- and every flag of a program with an empty table --
 # makes the text indirect ("unknown").  Only flags whose meaning for that program
 # is certain are listed; input-file / config / command flags (curl -K, wget -i/-e,
-# nmap -iL, ssh -F/-o/-L/-R/-D/-W) are deliberately absent.
+# nmap -iL, ssh -F/-o/-L/-R/-D/-W) are deliberately absent.  So are the redirect-
+# following flags (curl -L/--location/--location-trusted, httpie --follow): a
+# redirect can send the request to any host, so they make the text indirect.  wget
+# follows redirects by default, so every wget segment also needs `--max-redirect=0`
+# (see `_REDIRECT_GUARD`).
 _FLAGS: dict[str, dict[str, str]] = {
     "curl": _flag_table(
-        bool_="sSikLvfIqnN46pO",  # -p = --proxytunnel, -O = --remote-name
+        bool_="sSikvfIqnN46pO",  # -p = --proxytunnel, -O = --remote-name; no -L (redirects)
         method="X",
         num="m",
         value="xHdAeu",
         out="o",
-        long_bool="silent show-error insecure location verbose fail head include compressed ipv4 ipv6 "
+        long_bool="silent show-error insecure verbose fail head include compressed ipv4 ipv6 "
         "proxytunnel remote-name no-buffer netrc",
         long_method="request",
         long_num="max-time connect-timeout retry max-redirs",
@@ -178,7 +182,7 @@ _FLAGS: dict[str, dict[str, str]] = {
         long_bool="quiet verbose no-verbose recursive continue timestamping server-response spider "
         "no-check-certificate page-requisites convert-links",
         long_method="method",
-        long_num="tries timeout",
+        long_num="tries timeout max-redirect",
         long_value="header user-agent referer",
         long_out="output-document",
     ),
@@ -189,13 +193,21 @@ _FLAGS: dict[str, dict[str, str]] = {
     ),
     "nc": _flag_table(bool_="vznu46", num="wp"),
     "nmap": _flag_table(bool_="vn6F", num="p"),
-    "http": _flag_table(bool_="vfj", long_bool="verbose form json follow check-status"),
+    "http": _flag_table(bool_="vfj", long_bool="verbose form json check-status"),  # no --follow (redirects)
     "dig": _flag_table(bool_="46", num="p", value="x"),
     "nslookup": {},
     "host": _flag_table(bool_="46av", num="W"),
     "ping": _flag_table(bool_="qnv", num="csWi"),
 }
 _FLAGS["httpie"] = _FLAGS["http"]
+# Programs that follow redirects unless told not to: the (flag, value) that turns it
+# off.  A segment of such a program without exactly that flag and value is indirect.
+_REDIRECT_GUARD: dict[str, tuple[str, str]] = {"wget": ("--max-redirect", "0")}
+
+
+def _guards(head: str, flag: str, value: str) -> bool:
+    guard = _REDIRECT_GUARD.get(head)
+    return guard is not None and flag == guard[0] and value.isdigit() and int(value) == int(guard[1])
 _NO_FLAGS: dict[str, str] = {}  # interpreters, local commands, anything else
 _LONG_FLAG_RE = re.compile(r"^--[A-Za-z][A-Za-z0-9\-]*$")
 _METHOD_RE = re.compile(r"^[A-Z]{3,10}$")
@@ -234,8 +246,12 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
         return True
     at_head = True
     expect: str | None = None  # "method" | "num" | "value" | "out"
-
+    expect_flag = ""  # the flag whose value `expect` is waiting for
     head = ""
+    guarded = False  # this segment carries its program's `_REDIRECT_GUARD`
+
+    def unguarded() -> bool:  # the segment that just ended follows redirects
+        return head in _REDIRECT_GUARD and not guarded
 
     def check(kind: str, val: str) -> bool:
         if kind == "method":
@@ -246,6 +262,10 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
 
     for kind, val, raw in toks:
         if kind == "op":
+            if val in _SPLIT_OPS:
+                if unguarded():
+                    return True
+                head, guarded = "", False
             at_head = val in _SPLIT_OPS
             expect = None
             continue
@@ -264,6 +284,7 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
             expect = None
             if not ok:
                 return True
+            guarded = guarded or _guards(head, expect_flag, val)
             continue
         if val == "--":
             continue
@@ -279,8 +300,9 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
                 if eq:
                     if kind_ == "bool" or not check(kind_, value):
                         return True
+                    guarded = guarded or _guards(head, name, value)
                 elif kind_ != "bool":
-                    expect = kind_
+                    expect, expect_flag = kind_, name
                 continue
             letters = val[1:]
             if len(letters) == 1:
@@ -288,14 +310,14 @@ def _unclassified_words(text: str, workdir: Path | None) -> bool:
                 if kind_ is None:
                     return True
                 if kind_ != "bool":
-                    expect = kind_
+                    expect, expect_flag = kind_, val
                 continue
             if all(flags.get(f"-{c}") == "bool" for c in letters):
                 continue
             return True
         if not _recognized_value(val, workdir, paths_ok=head in LOCAL_COMMANDS):
             return True
-    return expect is not None
+    return expect is not None or unguarded()
 
 
 def extract_hosts(
@@ -318,7 +340,9 @@ def extract_hosts(
     host/URL, an upper-case method after that program's method flag (curl
     `-X`/`--request`), a number after that program's numeric flag, or an
     absolute `workdir` path as that program's output-file value.  Flag meanings
-    are per program; a flag not listed for its program is unknown.  A verdict on such
+    are per program; a flag not listed for its program is unknown.  Redirect
+    following is indirect too: curl `-L`/`--location`/`--location-trusted`, httpie
+    `--follow`, and any `wget` segment without `--max-redirect=0`.  A verdict on such
     text can never be trusted ("unknown").  Over-triggering is intentional.
 
     `file_like=False` ignores bare-domain matches whose TLD doubles as a common

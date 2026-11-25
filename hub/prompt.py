@@ -43,7 +43,8 @@ GATE_PROTOCOL = (
     "Before ANY command or fetch that could touch the target, call mcp__ei-gate__declare_action with the exact command text "
     "(byte-for-byte what you will run) or URL, plus why, technique (cite a WSTG or OWASP API Top 10 ID where one applies) and risk. "
     "Write files only to absolute paths under {workdir}. "
-    "Do not use curl -L / wget redirect-following toward hosts outside scope; mention redirects in risk."
+    "Avoid redirect-following (curl -L/--location, wget without --max-redirect=0): the gate cannot tell where it ends up, "
+    "so it marks it unknown scope. Mention redirects in risk."
 )
 
 # What each stage's agent is asked to do. {workdir}, {engagement_id}, {template} and {submissions} are filled in.

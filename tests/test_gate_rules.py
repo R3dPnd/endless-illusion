@@ -388,7 +388,7 @@ def test_strict_allowances_do_not_hide_hosts(cmd):
 
 def test_strict_legit_shapes_stay_known():
     for cmd in [
-        "curl -sSL -X POST --max-time 5 -m 3 https://in.scope.com/a?b=c",
+        "curl -sS -X POST --max-time 5 -m 3 https://in.scope.com/a?b=c",  # no -L: I6
         "curl --request=PUT in.scope.com:8443",
         "ssh root@in.scope.com",
         "curl -x in.scope.com:3128 in.scope.com",
@@ -443,7 +443,7 @@ def test_quoted_head_and_method_ok():
 def test_output_flag_per_program(wd):
     ok = lambda c: scope_verdict(*extract_hosts(c, workdir=wd), IN) == "in"
     assert ok(f"curl -o {wd}/x in.scope.com")
-    assert ok(f"wget -O {wd}/x in.scope.com")
+    assert ok(f"wget --max-redirect=0 -O {wd}/x in.scope.com")
     assert not ok(f"ssh -o {wd}/x in.scope.com")
     assert not ok(f"wget -o {wd}/x in.scope.com")
     assert not ok(f"curl -O {wd}/x in.scope.com")
@@ -514,8 +514,8 @@ def test_value_allowances_do_not_leak_across_programs(flag, value, prog):
         "ssh -X in.scope.com",
         "ssh -X -p 22 in.scope.com",
         "curl -p -x in.scope.com:3128 in.scope.com",
-        "wget -r in.scope.com",
-        "wget -qr --tries 3 in.scope.com",
+        "wget --max-redirect=0 -r in.scope.com",
+        "wget -qr --tries 3 --max-redirect 0 in.scope.com",
         "nc -vz in.scope.com",
         "nmap -p 443 in.scope.com",
         "ping -c 1 in.scope.com",
@@ -576,3 +576,38 @@ def test_fetch_verdict_plain_unrelated_is_out_and_exact_is_in():
     assert _fv("https://other.example.com/", ["app.example.com"]) == "out"  # sibling: neither parent nor subdomain
     assert _fv("http://127.0.0.1:3000/rest", ["127.0.0.1:3000"]) == "in"
     assert _fv("http://$H/", ["127.0.0.1:3000"]) == "unknown"
+
+
+# ---- I6: redirect following makes the destination unknowable ----
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    [
+        "curl -L in.scope.com",
+        "curl -sL in.scope.com",
+        "curl -sSL -X POST https://in.scope.com/a",
+        "curl --location in.scope.com",
+        "curl --location-trusted in.scope.com",
+        "wget in.scope.com",
+        "wget -q in.scope.com",
+        "wget -O /dev/null in.scope.com",
+        "wget --max-redirect=1 in.scope.com",
+        "wget --max-redirect 5 in.scope.com",
+        "wget --max-redirect=0 in.scope.com ; wget in.scope.com",  # each wget needs its own
+        "http --follow in.scope.com",
+    ],
+)
+def test_redirect_following_is_indirect(cmd):
+    hosts, indirect = extract_hosts(cmd)
+    assert indirect is True, cmd
+    assert scope_verdict(hosts, indirect, IN) == "unknown", cmd
+
+
+@pytest.mark.parametrize(
+    "cmd",
+    ["wget --max-redirect=0 in.scope.com", "wget --max-redirect 0 -q in.scope.com", "wget -q --max-redirect=0 -r in.scope.com",
+     "curl -s in.scope.com"],
+)
+def test_no_redirect_shapes_stay_in(cmd):
+    assert scope_verdict(*extract_hosts(cmd), IN) == "in", cmd
